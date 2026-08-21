@@ -1,0 +1,28 @@
+{
+  "name": "@pharmacy/app-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@pharmacy/design-tokens": "workspace:*",
+    "@pharmacy/types": "workspace:*",
+    "@tauri-apps/api": "^2.11.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@tauri-apps/cli": "^2.11.1",
+    "@vitejs/plugin-react": "^5.2.0",
+    "typescript": "^5.7.3",
+    "vite": "^7.3.6"
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json",
+    "dev": "vite",
+    "tauri": "tauri",
+    "build": "vite build",
+    "test": "vitest run --passWithNoTests"
+  }
+}

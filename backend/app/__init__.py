@@ -1,0 +1,1 @@
+"""Pharmacy platform modular monolith."""

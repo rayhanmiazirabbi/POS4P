@@ -1,0 +1,9 @@
+{
+  "name": "@pharmacy/validation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@pharmacy/core": "workspace:*", "@pharmacy/types": "workspace:*", "zod": "^3.24.1" },
+  "exports": { ".": { "types": "./src/index.ts", "import": "./src/index.ts" } },
+  "scripts": { "check": "tsc --noEmit -p tsconfig.json", "test": "vitest run" }
+}

@@ -1,0 +1,7 @@
+export type ReportFilters = { organizationId: string; storeIds?: readonly string[]; from: string; to: string; timezone: string; cursor?: string; limit?: number };
+export type SalesReportRow = { storeId: string; gross: string; refunds: string; due: string; cost?: string };
+export type SalesKpis = { gross: string; refunds: string; net: string; due: string; profit?: string };
+
+export function validateReportFilters(filters: ReportFilters): ReportFilters { if (filters.from >= filters.to) throw new Error('Report range must be non-empty'); if (filters.limit !== undefined && (!Number.isInteger(filters.limit) || filters.limit < 1 || filters.limit > 1000)) throw new Error('Invalid report limit'); return filters.storeIds ? { ...filters, storeIds: [...filters.storeIds] } : { ...filters }; }
+export function summarizeSales(rows: readonly SalesReportRow[], includeCosts: boolean): SalesKpis { const amount = (key: 'gross' | 'refunds' | 'due' | 'cost') => rows.reduce((total, row) => total + Number(row[key] ?? 0), 0).toFixed(2); const gross = amount('gross'); const refunds = amount('refunds'); const net = (Number(gross) - Number(refunds)).toFixed(2); const result: SalesKpis = { gross, refunds, net, due: amount('due') }; if (includeCosts) result.profit = (Number(net) - Number(amount('cost'))).toFixed(2); return result; }
+export function redactReportCosts(rows: readonly SalesReportRow[], canReadCosts: boolean): SalesReportRow[] { return rows.map((row) => canReadCosts ? { ...row } : (({ cost: _cost, ...withoutCost }) => withoutCost)(row)); }

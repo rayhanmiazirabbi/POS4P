@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.next/
+*.tsbuildinfo
+.turbo/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.venv/
+*.py[cod]
+coverage/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.pytest_cache/

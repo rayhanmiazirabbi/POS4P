@@ -1,0 +1,8 @@
+{"_e":"root:init","_t":1787301274318,"format":"v0-jsonl","version":"57.0.17"}
+{"_e":"env:mode","_t":1787301274461,"nodeEnv":"production","babelEnv":"production","mode":"production"}
+{"_e":"env:load","_t":1787301274462,"mode":"production","files":[],"env":{}}
+{"_e":"devserver:start","_t":1787301274555,"mode":"production","web":true,"baseUrl":"","asyncRoutes":false,"routerRoot":"../../../app","serverComponents":false,"serverActions":false,"serverRendering":false,"apiRoutes":false,"exporting":true}
+{"_e":"metro:config","_t":1787301275240,"serverRoot":"../../../../..","projectRoot":"../../..","exporting":true,"flags":{"autolinkingModuleResolution":true,"serverActions":false,"serverComponents":false,"reactCompiler":false,"optimizeGraph":false,"treeshaking":false,"logbox":false}}
+{"_e":"metro:instantiate","_t":1787301275347,"atlas":false,"workers":6,"host":null,"port":null}
+{"_e":"metro:bundling:started","_t":1787301275403,"id":"1","platform":"android","environment":null,"entry":"node_modules/.pnpm/expo-router@57.0.15_mnw3cglcwqlreyxa7umg2pqknq/node_modules/expo-router/entry.js"}
+{"_e":"metro:bundling:done","_t":1787301290469,"id":"1","total":1235,"ms":15066.33825}

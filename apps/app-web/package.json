@@ -1,0 +1,26 @@
+{
+  "name": "@pharmacy/app-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@pharmacy/api": "workspace:*",
+    "@pharmacy/design-tokens": "workspace:*",
+    "@pharmacy/types": "workspace:*",
+    "dexie": "^4.2.1",
+    "next": "^16.3.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.7.3"
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json",
+    "dev": "next dev",
+    "build": "next build",
+    "test": "vitest run --passWithNoTests"
+  }
+}

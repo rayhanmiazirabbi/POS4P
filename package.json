@@ -1,0 +1,16 @@
+{
+  "name": "pharmacy-platform",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "build": "pnpm --recursive --if-present build",
+    "check": "pnpm --recursive --if-present check",
+    "test": "pnpm --recursive --if-present test"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8",
+    "uuid": "^11.0.5",
+    "zod": "^3.24.1"
+  }
+}

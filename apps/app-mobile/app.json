@@ -1,0 +1,8 @@
+{
+  "expo": {
+    "name": "Pharmacy Platform",
+    "slug": "pharmacy-platform",
+    "scheme": "pharmacy-platform",
+    "plugins": ["expo-router", "expo-sqlite", "expo-secure-store"]
+  }
+}

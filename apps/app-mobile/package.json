@@ -1,0 +1,29 @@
+{
+  "name": "@pharmacy/app-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "dependencies": {
+    "@pharmacy/api": "workspace:*",
+    "@pharmacy/design-tokens": "workspace:*",
+    "@pharmacy/types": "workspace:*",
+    "expo": "^57.0.15",
+    "expo-router": "^57.0.15",
+    "expo-secure-store": "^57.0.1",
+    "expo-sqlite": "^57.0.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-worklets": "0.10.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@react-native/metro-config": "0.86.2",
+    "typescript": "^5.7.3"
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json",
+    "start": "expo start",
+    "test": "vitest run --passWithNoTests"
+  }
+}
