@@ -5,7 +5,17 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 
 from app.errors import register_exception_handlers
-from app.routers import auth_router, organizations_router, stores_router, users_router
+from app.routers import (
+    auth_router,
+    catalog_router,
+    inventory_router,
+    organizations_router,
+    products_router,
+    purchasing_router,
+    stores_router,
+    suppliers_router,
+    users_router,
+)
 
 app = FastAPI(title="Pharmacy Platform API", version="0.1.0")
 
@@ -21,10 +31,18 @@ async def request_id_middleware(request: Request, call_next):
 
 register_exception_handlers(app)
 
-app.include_router(auth_router)
-app.include_router(organizations_router)
-app.include_router(stores_router)
-app.include_router(users_router)
+for router in (
+    auth_router,
+    organizations_router,
+    stores_router,
+    users_router,
+    catalog_router,
+    products_router,
+    suppliers_router,
+    inventory_router,
+    purchasing_router,
+):
+    app.include_router(router)
 
 
 @app.get("/health", tags=["system"])

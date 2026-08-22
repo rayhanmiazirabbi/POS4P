@@ -67,7 +67,7 @@ This index defines the implementation order and shared rules for the 41 module p
 ## Delivery order
 
 1. [x] Foundation: organizations, stores, users, auth, types, validation, money, permissions, API, core, design tokens.
-2. [ ] Catalogue and stock: catalog, products, medicine, inventory, purchasing, suppliers, inventory/purchasing/sales frontend packages.
+2. [x] Catalogue and stock: catalog, products, medicine, inventory, purchasing, suppliers, inventory/purchasing/sales frontend packages.
 3. POS: payments, sales, customers, reports, all three application shells, sync.
 4. Retention and multi-store: loyalty, customer history, transfers, richer reports, device management.
 5. Commerce: ecommerce, orders, prescriptions, online checkout and listings.
