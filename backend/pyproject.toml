@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["httpx>=0.28,<1", "pytest>=8.3,<9", "pytest-asyncio>=0.24,<1", "ruff>=0.9,<1", "mypy>=1.14,<2"]
+dev = ["httpx>=0.28,<1", "pytest>=8.3,<9", "pytest-asyncio>=0.24,<1", "ruff>=0.9,<1", "mypy>=1.14,<2", "aiosqlite>=0.20,<1"]
 
 [tool.ruff]
 target-version = "py312"
@@ -23,3 +23,7 @@ line-length = 100
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+filterwarnings = [
+  # pytest-asyncio still calls the loop-policy APIs deprecated in Python 3.14.
+  "ignore:'asyncio.[gs]et_event_loop_policy' is deprecated:DeprecationWarning",
+]
