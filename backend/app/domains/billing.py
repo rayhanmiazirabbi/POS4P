@@ -5,10 +5,16 @@ from decimal import Decimal
 from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Numeric, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, OrganizationScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import (
+    Base,
+    OrganizationScopedMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    money_column,
+)
 
 
 class SubscriptionStatus(str, Enum):
@@ -23,7 +29,7 @@ class BillingPlan(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     code: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
-    monthly_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    monthly_amount: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
     entitlements: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     active: Mapped[bool] = mapped_column(default=True, nullable=False)
 
@@ -44,7 +50,7 @@ class BillingInvoice(OrganizationScopedMixin, UUIDPrimaryKeyMixin, Base):
 
     subscription_id: Mapped[UUID] = mapped_column(ForeignKey("organization_subscriptions.id"), nullable=False)
     invoice_number: Mapped[str] = mapped_column(String(80), nullable=False)
-    amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(40), nullable=False)

@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import (
@@ -15,6 +15,8 @@ from app.models.base import (
     StoreScopedMixin,
     TimestampMixin,
     UUIDPrimaryKeyMixin,
+    money_column,
+    quantity_column,
 )
 
 
@@ -34,7 +36,7 @@ class InventoryBatch(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base
     store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
     batch_number: Mapped[str] = mapped_column(String(100), nullable=False)
     expiry_date: Mapped[date | None] = mapped_column(Date)
-    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    unit_cost: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -46,7 +48,7 @@ class InventoryMovement(AppendOnlyMixin, StoreScopedMixin, UUIDPrimaryKeyMixin, 
     store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
     batch_id: Mapped[UUID | None] = mapped_column(ForeignKey("inventory_batches.id"))
     movement_type: Mapped[InventoryMovementType] = mapped_column(nullable=False)
-    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(quantity_column(), nullable=False)
     reference_type: Mapped[str | None] = mapped_column(String(80))
     reference_id: Mapped[UUID | None] = mapped_column()
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -59,8 +61,8 @@ class InventoryBalance(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Ba
     __table_args__ = (UniqueConstraint("store_id", "store_product_id"),)
 
     store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
-    on_hand: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0, nullable=False)
-    reserved: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0, nullable=False)
+    on_hand: Mapped[Decimal] = mapped_column(quantity_column(), default=0, nullable=False)
+    reserved: Mapped[Decimal] = mapped_column(quantity_column(), default=0, nullable=False)
 
 
 class StockReservation(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -71,7 +73,7 @@ class StockReservation(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Ba
     batch_id: Mapped[UUID] = mapped_column(ForeignKey("inventory_batches.id"), nullable=False)
     reference_type: Mapped[str] = mapped_column(String(80), nullable=False)
     reference_id: Mapped[UUID] = mapped_column(nullable=False)
-    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(quantity_column(), nullable=False)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

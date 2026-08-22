@@ -5,10 +5,17 @@ from decimal import Decimal
 from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, StoreScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import (
+    Base,
+    StoreScopedMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    money_column,
+    quantity_column,
+)
 
 
 class PurchaseStatus(str, Enum):
@@ -25,7 +32,7 @@ class Purchase(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id"), nullable=False)
     status: Mapped[PurchaseStatus] = mapped_column(default=PurchaseStatus.DRAFT, nullable=False)
     invoice_number: Mapped[str | None] = mapped_column(String(100))
-    total_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0, nullable=False)
+    total_amount: Mapped[Decimal] = mapped_column(money_column(), default=0, nullable=False)
     purchased_at: Mapped[date] = mapped_column(Date, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
@@ -37,7 +44,7 @@ class PurchaseItem(UUIDPrimaryKeyMixin, Base):
 
     purchase_id: Mapped[UUID] = mapped_column(ForeignKey("purchases.id"), nullable=False)
     store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
-    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
-    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(quantity_column(), nullable=False)
+    unit_cost: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
     batch_number: Mapped[str] = mapped_column(String(100), nullable=False)
     expiry_date: Mapped[date | None] = mapped_column(Date)

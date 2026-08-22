@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { calculateSaleTotals, createSaleSnapshot, validateReturn, type SaleLine } from '../src/index';
-import { money } from '@pharmacy/money';
+import { allocateLineDiscounts, calculateSaleTotals, createSaleSnapshot, validateReturn, type SaleLine } from '../src/index';
+import { add, money } from '@pharmacy/money';
 
 const line: SaleLine = { id: 'l1', productId: 'p1', name: 'Item', quantity: 2, unitPrice: money('10.00'), discount: money('1.00'), tax: money('0.50') };
 
@@ -17,4 +17,14 @@ describe('sales', () => {
     expect(() => validateReturn({ saleId: 's1', lines: [{ saleLineId: 'l1', quantity: 1 }] }, sale)).not.toThrow();
   });
   it('keeps calculation pure', () => { expect(calculateSaleTotals([line]).total.amount).toBe('19.50'); });
+  it('allocates an order-level discount across lines without losing a cent', () => {
+    const lines: SaleLine[] = [
+      { ...line, id: 'a', unitPrice: money('33.34'), discount: money('0.00'), quantity: 1 },
+      { ...line, id: 'b', unitPrice: money('33.33'), discount: money('0.00'), quantity: 1 },
+      { ...line, id: 'c', unitPrice: money('33.33'), discount: money('0.00'), quantity: 1 },
+    ];
+    const parts = allocateLineDiscounts(lines, money('10.00'));
+    expect(parts.map((part) => part.amount)).toEqual(['3.34', '3.33', '3.33']);
+    expect(add(...parts).amount).toBe('10.00');
+  });
 });

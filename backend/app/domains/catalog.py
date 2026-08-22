@@ -4,10 +4,16 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import AppendOnlyMixin, Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import (
+    AppendOnlyMixin,
+    Base,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    quantity_column,
+)
 
 
 class Manufacturer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -38,7 +44,7 @@ class CatalogProduct(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     dosage_form_id: Mapped[UUID | None] = mapped_column(ForeignKey("dosage_forms.id"))
     name: Mapped[str] = mapped_column(String(240), nullable=False)
     strength: Mapped[str | None] = mapped_column(String(100))
-    package_size: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=1, nullable=False)
+    package_size: Mapped[Decimal] = mapped_column(quantity_column(), default=1, nullable=False)
     package_unit: Mapped[str] = mapped_column(String(40), nullable=False)
     prescription_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     country_code: Mapped[str] = mapped_column(String(2), nullable=False)
@@ -51,7 +57,7 @@ class CatalogProductIngredient(UUIDPrimaryKeyMixin, Base):
 
     catalog_product_id: Mapped[UUID] = mapped_column(ForeignKey("catalog_products.id"), nullable=False)
     active_ingredient_id: Mapped[UUID] = mapped_column(ForeignKey("active_ingredients.id"), nullable=False)
-    strength: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    strength: Mapped[Decimal | None] = mapped_column(quantity_column())
     unit: Mapped[str | None] = mapped_column(String(30))
 
 

@@ -3,10 +3,16 @@ from __future__ import annotations
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, StoreScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import (
+    Base,
+    StoreScopedMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    money_column,
+)
 
 
 class Storefront(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -26,7 +32,7 @@ class EcommerceProductSetting(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMi
     store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
     online_name: Mapped[str | None] = mapped_column(String(240))
     description: Mapped[str | None] = mapped_column(Text)
-    online_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    online_price: Mapped[Decimal | None] = mapped_column(money_column())
     listed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     pickup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     delivery_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

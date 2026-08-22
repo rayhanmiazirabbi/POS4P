@@ -1,4 +1,4 @@
-import { add, money, multiply, type MoneyValue } from '@pharmacy/money';
+import { add, allocate, multiply, subtract, type MoneyValue } from '@pharmacy/money';
 
 export type SaleLine = { id: string; productId: string; name: string; quantity: number; unitPrice: MoneyValue; discount: MoneyValue; tax: MoneyValue };
 export type Payment = { method: 'cash' | 'bkash' | 'nagad' | 'due'; amount: MoneyValue };
@@ -12,10 +12,17 @@ export function calculateSaleTotals(lines: readonly SaleLine[], payments: readon
   const subtotal = add(...lines.map((line) => multiply(line.unitPrice, line.quantity)));
   const discount = add(...lines.map((line) => line.discount));
   const tax = add(...lines.map((line) => line.tax));
-  const total = add(subtotal, money(`-${discount.amount}`), tax);
+  const total = subtract(add(subtotal, tax), discount);
   const paid = add(...payments.map((payment) => payment.amount));
-  const due = add(total, money(`-${paid.amount}`));
+  const due = subtract(total, paid);
   return { subtotal, discount, tax, total, paid, due };
+}
+
+/** Spread an order-level discount over lines weighted by what each line costs, so
+ *  the parts sum exactly to `discount` and no line absorbs a rounding ghost. */
+export function allocateLineDiscounts(lines: readonly SaleLine[], discount: MoneyValue): MoneyValue[] {
+  const weights = lines.map((line) => Number(multiply(line.unitPrice, line.quantity).amount.replace('.', '')));
+  return allocate(discount, weights);
 }
 
 export function createSaleSnapshot(input: Omit<SaleSnapshot, 'totals'> & { payments?: readonly Payment[] }): SaleSnapshot {

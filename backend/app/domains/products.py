@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import (
@@ -14,6 +14,8 @@ from app.models.base import (
     StoreScopedMixin,
     TimestampMixin,
     UUIDPrimaryKeyMixin,
+    money_column,
+    quantity_column,
 )
 
 
@@ -41,8 +43,8 @@ class StoreProduct(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     pharmacy_product_id: Mapped[UUID] = mapped_column(ForeignKey("pharmacy_products.id"), nullable=False)
     sku: Mapped[str] = mapped_column(String(64), nullable=False)
-    sale_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
-    minimum_stock: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0, nullable=False)
+    sale_price: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
+    minimum_stock: Mapped[Decimal] = mapped_column(quantity_column(), default=0, nullable=False)
     rack: Mapped[str | None] = mapped_column(String(80))
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -52,6 +54,6 @@ class StoreProductPrice(AppendOnlyMixin, StoreScopedMixin, UUIDPrimaryKeyMixin, 
     __table_args__ = (Index("ix_product_price_history", "store_product_id", "effective_at"),)
 
     store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
-    price: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    price: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
     effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     actor_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))

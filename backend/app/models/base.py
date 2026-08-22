@@ -4,7 +4,7 @@ import enum
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, Enum, ForeignKey, MetaData, Uuid, event, func
+from sqlalchemy import DateTime, Enum, ForeignKey, MetaData, Numeric, Uuid, event, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from uuid6 import uuid7
 
@@ -23,6 +23,25 @@ def enum_column[E: enum.Enum](enum_cls: type[E], length: int = 40) -> Enum:
         length=length,
         values_callable=lambda cls: [member.value for member in cls],
     )
+
+
+def money_column() -> Numeric:
+    """Money is 2 decimal places everywhere, backend and frontend alike.
+
+    ``@pharmacy/money`` computes in integer cents, so a money column with more than
+    2 places silently holds values the client cannot represent. Use
+    :func:`quantity_column` for anything that is not a price or an amount.
+    """
+    return Numeric(18, 2)
+
+
+def quantity_column() -> Numeric:
+    """Stock counts and dosages need fractional units (half a strip, 2.5 mg).
+
+    Not money: 4 places is a measurement precision, never a rounding decision,
+    and these values never pass through ``@pharmacy/money``.
+    """
+    return Numeric(18, 4)
 
 
 class Base(DeclarativeBase):

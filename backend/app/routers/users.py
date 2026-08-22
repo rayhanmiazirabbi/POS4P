@@ -11,6 +11,7 @@ from app.models import RecordStatus, Role
 from app.schemas.base import Envelope, Page
 from app.schemas.users import (
     MembershipResponse,
+    MembershipStatus,
     PinSetRequest,
     PinStatusResponse,
     StoreAssignmentRequest,
@@ -32,7 +33,7 @@ router = APIRouter(prefix="/users", tags=["Users"])
 UserAdminDep = Annotated[RequestContext, Depends(require_roles(Role.OWNER, Role.MANAGER))]
 
 
-def _membership_status(active: bool) -> str:
+def _membership_status(active: bool) -> MembershipStatus:
     return "active" if active else "inactive"
 
 

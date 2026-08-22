@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Numeric, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import (
@@ -15,6 +15,8 @@ from app.models.base import (
     StoreScopedMixin,
     TimestampMixin,
     UUIDPrimaryKeyMixin,
+    money_column,
+    quantity_column,
 )
 
 
@@ -51,8 +53,8 @@ class Order(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     customer_id: Mapped[UUID | None] = mapped_column(ForeignKey("customers.id"))
     status: Mapped[OrderStatus] = mapped_column(default=OrderStatus.PENDING, nullable=False)
-    subtotal: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
-    total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    subtotal: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
+    total: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     delivery_address: Mapped[dict | None] = mapped_column(JSON)
     prescription_required: Mapped[bool] = mapped_column(default=False, nullable=False)
@@ -64,9 +66,9 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
     order_id: Mapped[UUID] = mapped_column(ForeignKey("orders.id"), nullable=False)
     store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
     product_name: Mapped[str] = mapped_column(String(240), nullable=False)
-    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
-    unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
-    line_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(quantity_column(), nullable=False)
+    unit_price: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
+    line_total: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
 
 
 class OrderStatusHistory(AppendOnlyMixin, StoreScopedMixin, UUIDPrimaryKeyMixin, Base):

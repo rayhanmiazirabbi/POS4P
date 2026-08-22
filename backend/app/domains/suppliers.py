@@ -5,7 +5,7 @@ from decimal import Decimal
 from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import (
@@ -15,6 +15,7 @@ from app.models.base import (
     StoreScopedMixin,
     TimestampMixin,
     UUIDPrimaryKeyMixin,
+    money_column,
 )
 
 
@@ -49,7 +50,7 @@ class SupplierLedgerEntry(AppendOnlyMixin, StoreScopedMixin, UUIDPrimaryKeyMixin
 
     supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id"), nullable=False)
     entry_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
     reference_type: Mapped[str | None] = mapped_column(String(80))
     reference_id: Mapped[UUID | None] = mapped_column()
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)

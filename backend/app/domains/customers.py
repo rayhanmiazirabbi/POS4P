@@ -3,10 +3,16 @@ from __future__ import annotations
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Numeric, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, OrganizationScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import (
+    Base,
+    OrganizationScopedMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    money_column,
+)
 
 
 class Customer(OrganizationScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -16,7 +22,7 @@ class Customer(OrganizationScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Bas
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     normalized_phone: Mapped[str | None] = mapped_column(String(32))
     email: Mapped[str | None] = mapped_column(String(254))
-    due_balance: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0, nullable=False)
+    due_balance: Mapped[Decimal] = mapped_column(money_column(), default=0, nullable=False)
     preferences: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

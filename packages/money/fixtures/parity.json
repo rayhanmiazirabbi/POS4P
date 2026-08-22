@@ -1,0 +1,42 @@
+{
+  "add": [
+    { "a": "10.25", "b": "5.75", "expected": "16.00" },
+    { "a": "0.10", "b": "0.20", "expected": "0.30" },
+    { "a": "-5.00", "b": "3.25", "expected": "-1.75" }
+  ],
+  "subtract": [
+    { "a": "100.00", "b": "40.00", "expected": "60.00" },
+    { "a": "40.00", "b": "100.00", "expected": "-60.00" },
+    { "a": "10.00", "b": "10.00", "expected": "0.00" }
+  ],
+  "multiply": [
+    { "a": "10.25", "n": 3, "expected": "30.75" },
+    { "a": "12.34", "n": 5, "expected": "61.70" },
+    { "a": "7.77", "n": 0, "expected": "0.00" }
+  ],
+  "round": [
+    { "value": "10.255", "mode": "half-up", "expected": "10.26" },
+    { "value": "10.255", "mode": "half-even", "expected": "10.26" },
+    { "value": "10.245", "mode": "half-up", "expected": "10.25" },
+    { "value": "10.245", "mode": "half-even", "expected": "10.24" },
+    { "value": "10.249", "mode": "down", "expected": "10.24" },
+    { "value": "10.241", "mode": "up", "expected": "10.25" },
+    { "value": "-10.255", "mode": "half-up", "expected": "-10.26" },
+    { "value": "-10.255", "mode": "half-even", "expected": "-10.26" },
+    { "value": "-10.245", "mode": "half-even", "expected": "-10.24" },
+    { "value": "0.005", "mode": "half-even", "expected": "0.00" },
+    { "value": "0.005", "mode": "half-up", "expected": "0.01" },
+    { "value": "1.005", "mode": "half-even", "expected": "1.00" },
+    { "value": "1.2", "mode": "half-up", "expected": "1.20" },
+    { "value": "3", "mode": "half-even", "expected": "3.00" }
+  ],
+  "allocate": [
+    { "total": "100.00", "weights": [1, 1, 1], "expected": ["33.34", "33.33", "33.33"] },
+    { "total": "10.00", "weights": [1, 1, 1], "expected": ["3.34", "3.33", "3.33"] },
+    { "total": "0.01", "weights": [1, 1, 1], "expected": ["0.01", "0.00", "0.00"] },
+    { "total": "100.00", "weights": [0.5, 0.5], "expected": ["50.00", "50.00"] },
+    { "total": "100.00", "weights": [1, 0, 1], "expected": ["50.00", "0.00", "50.00"] },
+    { "total": "13.37", "weights": [2, 1], "expected": ["8.92", "4.45"] },
+    { "total": "1000.00", "weights": [3, 3, 4], "expected": ["300.00", "300.00", "400.00"] }
+  ]
+}

@@ -13,7 +13,7 @@ export type Store = {
   currency: Currency; status: EntityStatus; createdAt: ISODateTime;
 };
 export type User = { id: UUID; phone: string; displayName: string; status: EntityStatus; createdAt: ISODateTime };
-export type Membership = { userId: UUID; organizationId: UUID; role: Role; status: 'active' | 'invited' };
+export type Membership = { userId: UUID; organizationId: UUID; role: Role; status: 'active' | 'inactive' };
 export type StoreMembership = { userId: UUID; storeId: UUID; role: Role; status: 'active' | 'inactive' };
 
 export type Session = { accessToken: string; refreshToken: string; expiresAt: ISODateTime; user: User };

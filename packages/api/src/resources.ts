@@ -113,6 +113,128 @@ export type PinStatus = { userId: string; pinSet: boolean };
 
 export type UserListFilters = { role?: Role; status?: EntityStatus; storeId?: string };
 
+/** Mirrors `DeviceClaim` in `backend/app/schemas/auth.py`. */
+export type DeviceClaim = { deviceKey: string; deviceName: string };
+
+export type OtpPurpose = 'login' | 'signup' | 'phone_change';
+export type OtpRequest = { phone: string; purpose?: OtpPurpose };
+export type OtpChallenge = { challengeId: string; expiresAt: string; devCode?: string | null };
+export type OtpVerifyRequest = { challengeId: string; code: string; displayName?: string; device?: DeviceClaim };
+export type PinLoginRequest = { phone: string; pin: string; organizationId: string; storeId?: string; device?: DeviceClaim };
+export type RefreshRequest = { refreshToken: string };
+export type SelectContextRequest = { organizationId: string; storeId?: string; device?: DeviceClaim };
+
+export type MembershipOption = { organizationId: string; organizationName: string; role: Role; storeIds: readonly string[] };
+
+/** Mirrors `TokenResponse`: the credential pair plus the context-selection shell. */
+export type TokenBundle = {
+  accessToken: string;
+  refreshToken: string;
+  tokenType: 'bearer';
+  expiresIn: number;
+  sessionId: string;
+  user: User;
+  organizationId?: string | null;
+  storeId?: string | null;
+  role?: Role | null;
+  requiresOrganization: boolean;
+  organizations: readonly MembershipOption[];
+};
+
+export type AuthSession = {
+  id: string;
+  organizationId?: string | null;
+  storeId?: string | null;
+  deviceId?: string | null;
+  expiresAt: string;
+  createdAt: string;
+  revokedAt?: string | null;
+  current: boolean;
+};
+
+/** Mirrors `CurrentUserResponse` (`GET /auth/me`): live rows, not token claims. */
+export type CurrentUser = {
+  user: User;
+  organizationId: string;
+  organizationName: string;
+  role: Role;
+  storeId?: string | null;
+  storeName?: string | null;
+  deviceId?: string | null;
+  pinSet: boolean;
+  sessionId: string;
+  sessionExpiresAt: string;
+};
+
+export type DeviceStatus = 'active' | 'revoked';
+export type DeviceRegisterRequest = { deviceKey: string; name: string };
+export type Device = {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  deviceKey: string;
+  name: string;
+  status: DeviceStatus;
+  lastSeenAt?: string | null;
+  createdAt: string;
+};
+
+export type LogoutResult = { revokedSessionIds: readonly string[] };
+
+export type SessionListFilters = { userId?: string };
+
+/**
+ * Typed client for `/auth` (`backend/app/routers/auth.py`).
+ *
+ * Three wire traps are encoded here on purpose: `listSessions` sends `user_id`
+ * in snake_case (the backend reads the raw query name and silently ignores a
+ * camelCased one), `DeviceRegisterRequest.name` is `deviceName` on the login
+ * claim, and every body is `extra="forbid"` server-side, so callers must pass
+ * exactly the typed shape -- never spread extra client state into a body.
+ */
+export type AuthClient = {
+  requestOtp(body: OtpRequest, options?: RequestOptions): Promise<ApiResponse<OtpChallenge>>;
+  verifyOtp(body: OtpVerifyRequest, options?: RequestOptions): Promise<ApiResponse<TokenBundle>>;
+  loginWithPin(body: PinLoginRequest, options?: RequestOptions): Promise<ApiResponse<TokenBundle>>;
+  refresh(body: RefreshRequest, options?: RequestOptions): Promise<ApiResponse<TokenBundle>>;
+  selectContext(body: SelectContextRequest, options?: RequestOptions): Promise<ApiResponse<TokenBundle>>;
+  me(options?: RequestOptions): Promise<ApiResponse<CurrentUser>>;
+  listSessions(filters?: SessionListFilters, options?: RequestOptions): Promise<ApiResponse<readonly AuthSession[]>>;
+  logout(options?: RequestOptions): Promise<ApiResponse<LogoutResult>>;
+  revokeSession(sessionId: string, options?: RequestOptions): Promise<ApiResponse<AuthSession>>;
+  registerDevice(body: DeviceRegisterRequest, options?: RequestOptions): Promise<ApiResponse<Device>>;
+  listDevices(options?: RequestOptions): Promise<ApiResponse<readonly Device[]>>;
+  revokeDevice(deviceId: string, options?: RequestOptions): Promise<ApiResponse<Device>>;
+};
+
+const ANONYMOUS: RequestOptions = { anonymous: true };
+
+export function createAuthClient(client: ApiClient): AuthClient {
+  return {
+    requestOtp: (body, options = {}) => client.post<OtpChallenge>('/auth/otp/request', body, { ...ANONYMOUS, ...options }),
+    verifyOtp: (body, options = {}) => client.post<TokenBundle>('/auth/otp/verify', body, { ...ANONYMOUS, ...options }),
+    loginWithPin: (body, options = {}) => client.post<TokenBundle>('/auth/pin/login', body, { ...ANONYMOUS, ...options }),
+    refresh: (body, options = {}) => client.post<TokenBundle>('/auth/refresh', body, { ...ANONYMOUS, ...options }),
+    // Bearer-authenticated but valid before an organization is chosen: this is
+    // the post-OTP tenant-selection hop, so the token may carry no `org` claim.
+    selectContext: (body, options = {}) => client.post<TokenBundle>('/auth/context', body, options),
+    me: (options = {}) => client.get<CurrentUser>('/auth/me', options),
+    listSessions: (filters = {}, options = {}) =>
+      client.request<readonly AuthSession[]>('/auth/sessions', { method: 'GET' }, {
+        ...options,
+        query: { ...options.query, user_id: filters.userId },
+      }),
+    logout: (options = {}) => client.post<LogoutResult>('/auth/logout', undefined, options),
+    revokeSession: (sessionId, options = {}) =>
+      client.post<AuthSession>(`/auth/sessions/${segment(sessionId)}/revoke`, undefined, options),
+    // Returns 201; owner/manager only (the router's AdminDep).
+    registerDevice: (body, options = {}) => client.post<Device>('/auth/devices', body, options),
+    listDevices: (options = {}) => client.get<readonly Device[]>('/auth/devices', options),
+    revokeDevice: (deviceId, options = {}) =>
+      client.post<Device>(`/auth/devices/${segment(deviceId)}/revoke`, undefined, options),
+  };
+}
+
 /** Typed client for `/organizations` (`backend/app/routers/organizations.py`). */
 export type OrganizationsClient = {
   create(body: OrganizationCreateRequest, options?: RequestOptions): Promise<ApiResponse<OrganizationCreateResponse>>;
@@ -203,6 +325,7 @@ export function createUsersClient(client: ApiClient): UsersClient {
 /** Every typed client, built over one transport. */
 export type PharmacyApi = {
   client: ApiClient;
+  auth: AuthClient;
   organizations: OrganizationsClient;
   stores: StoresClient;
   users: UsersClient;
@@ -211,6 +334,7 @@ export type PharmacyApi = {
 export function createPharmacyApi(client: ApiClient): PharmacyApi {
   return {
     client,
+    auth: createAuthClient(client),
     organizations: createOrganizationsClient(client),
     stores: createStoresClient(client),
     users: createUsersClient(client),

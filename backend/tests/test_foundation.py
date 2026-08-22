@@ -27,12 +27,11 @@ async def test_health_returns_request_id(client: AsyncClient) -> None:
 
 
 async def test_unauthenticated_request_uses_shared_error_shape(client: AsyncClient) -> None:
-    response = await client.get("/users/me")
-    assert response.status_code in (401, 404)
-    if response.status_code == 401:
-        body = response.json()
-        assert body["code"] == "UNAUTHORIZED"
-        assert "requestId" in body
+    response = await client.get("/auth/me")
+    assert response.status_code == 401
+    body = response.json()
+    assert body["code"] == "UNAUTHORIZED"
+    assert "requestId" in body
 
 
 async def test_access_token_round_trip() -> None:
