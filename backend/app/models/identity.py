@@ -42,6 +42,10 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     display_name: Mapped[str] = mapped_column(String(160), nullable=False)
     status: Mapped[RecordStatus] = mapped_column(enum_column(RecordStatus), default=RecordStatus.ACTIVE, nullable=False)
     pin_hash: Mapped[str | None] = mapped_column(String(255))
+    #: Brute-force state for PIN login. Kept on the user rather than in a cache so a
+    #: lockout survives a restart and cannot be cleared by reconnecting.
+    pin_attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    pin_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     memberships: Mapped[list[OrganizationUser]] = relationship(back_populates="user")
 
@@ -106,9 +110,14 @@ class Session(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "sessions"
 
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
-    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
+    #: Null only between OTP verification and tenant selection -- a brand-new owner
+    #: is authenticated before the organization they will administer exists.
+    organization_id: Mapped[UUID | None] = mapped_column(ForeignKey("organizations.id"))
     store_id: Mapped[UUID | None] = mapped_column(ForeignKey("stores.id"))
     refresh_token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    #: The hash this session's refresh token replaced. Presenting it again means the
+    #: token leaked, so the session is revoked rather than refreshed.
+    rotated_from_hash: Mapped[str | None] = mapped_column(String(255), index=True)
     device_id: Mapped[UUID | None] = mapped_column()
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

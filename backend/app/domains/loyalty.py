@@ -5,9 +5,16 @@ from datetime import datetime
 from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
-from app.models.base import AppendOnlyMixin, Base, OrganizationScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+
+from app.models.base import (
+    AppendOnlyMixin,
+    Base,
+    OrganizationScopedMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+)
 
 
 class LoyaltyTransactionType(str, Enum):

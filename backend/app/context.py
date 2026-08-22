@@ -15,6 +15,9 @@ class RequestContext:
     role: Role
     store_id: UUID | None = None
     device_id: UUID | None = None
+    #: The session the access token was minted from. Needed so logout can revoke
+    #: exactly the caller's own session instead of guessing at one of their rows.
+    session_id: UUID | None = None
 
 
 def require_context(request: Request) -> RequestContext:

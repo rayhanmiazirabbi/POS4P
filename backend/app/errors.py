@@ -9,7 +9,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 #: Mirrors the ``DomainErrorCode`` union exported by ``@pharmacy/core``.
 ERROR_STATUS: dict[str, int] = {
-    "VALIDATION_ERROR": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "VALIDATION_ERROR": status.HTTP_422_UNPROCESSABLE_CONTENT,
     "UNAUTHORIZED": status.HTTP_401_UNAUTHORIZED,
     "FORBIDDEN": status.HTTP_403_FORBIDDEN,
     "NOT_FOUND": status.HTTP_404_NOT_FOUND,
@@ -109,7 +109,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             location = [str(part) for part in error["loc"] if part not in ("body", "query", "path")]
             field_errors.setdefault(".".join(location) or "_", []).append(error["msg"])
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content=error_body(
                 "VALIDATION_ERROR", "Request validation failed", _request_id(request), field_errors
             ),

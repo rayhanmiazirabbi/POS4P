@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import TypeVar
 from uuid import UUID
 
 from sqlalchemy import DateTime, Enum, ForeignKey, MetaData, Uuid, event, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from uuid6 import uuid7
 
-E = TypeVar("E", bound=enum.Enum)
 
-
-def enum_column(enum_cls: type[E], length: int = 40) -> Enum:
+def enum_column[E: enum.Enum](enum_cls: type[E], length: int = 40) -> Enum:
     """Store the enum *value* rather than its Python member name.
 
     SQLAlchemy defaults to persisting names (``ACTIVE``), which would not match the

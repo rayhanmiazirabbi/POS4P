@@ -4,10 +4,17 @@ from datetime import datetime
 from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, OrganizationScopedMixin, StoreScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import (
+    Base,
+    OrganizationScopedMixin,
+    StoreScopedMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    enum_column,
+)
 
 
 class DeviceStatus(str, Enum):
@@ -22,7 +29,7 @@ class Device(OrganizationScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base)
     store_id: Mapped[UUID] = mapped_column(ForeignKey("stores.id"), nullable=False)
     device_key: Mapped[str] = mapped_column(String(160), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
-    status: Mapped[DeviceStatus] = mapped_column(default=DeviceStatus.ACTIVE, nullable=False)
+    status: Mapped[DeviceStatus] = mapped_column(enum_column(DeviceStatus), default=DeviceStatus.ACTIVE, nullable=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

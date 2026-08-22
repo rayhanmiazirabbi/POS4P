@@ -9,7 +9,13 @@ from uuid import UUID
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import AppendOnlyMixin, Base, StoreScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import (
+    AppendOnlyMixin,
+    Base,
+    StoreScopedMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+)
 
 
 class InventoryMovementType(str, Enum):
@@ -107,5 +113,5 @@ def rebuild_balances(movements: list[tuple[UUID, Decimal]]) -> dict[UUID, Decima
     """Rebuild on-hand totals from signed ledger quantities."""
     totals: dict[UUID, Decimal] = {}
     for product_id, quantity in movements:
-        totals[product_id] = totals.get(product_id, Decimal("0")) + quantity
+        totals[product_id] = totals.get(product_id, Decimal(0)) + quantity
     return totals

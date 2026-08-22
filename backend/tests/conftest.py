@@ -11,7 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.db import get_session
 from app.main import app
-from app.models import Base, Organization, OrganizationUser, RecordStatus, Role, Store, StoreUser, User
+from app.models import (
+    Base,
+    Organization,
+    OrganizationUser,
+    Role,
+    Store,
+    StoreUser,
+    User,
+)
 from app.security import hash_secret, sign_access_token
 
 
@@ -134,10 +142,10 @@ async def tenant(
     make_membership: Callable[..., Any],
 ) -> dict[str, Any]:
     """A committed organization with an owner, one store, and an active session row."""
+    from datetime import timedelta
+
     from app.models import Session as SessionModel
     from app.security import generate_token, hash_token, utc_now
-
-    from datetime import timedelta
 
     organization = await make_organization()
     owner = await make_user(phone="+8801700000001", display_name="Owner", pin="1234")

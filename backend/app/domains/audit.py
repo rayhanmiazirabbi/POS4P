@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
-from app.models.cross_cutting import AuditLog, OutboxEvent
 from uuid6 import uuid7
+
+from app.models.cross_cutting import AuditLog, OutboxEvent
 
 
 def make_audit_log(
@@ -31,7 +32,7 @@ def make_audit_log(
         request_id=request_id,
         before_data=before_data,
         after_data=after_data,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -43,5 +44,5 @@ def make_outbox_event(organization_id: UUID, event_type: str, aggregate_type: st
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
         payload=payload,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )

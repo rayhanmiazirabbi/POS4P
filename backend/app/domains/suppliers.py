@@ -8,7 +8,14 @@ from uuid import UUID
 from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import AppendOnlyMixin, Base, OrganizationScopedMixin, StoreScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import (
+    AppendOnlyMixin,
+    Base,
+    OrganizationScopedMixin,
+    StoreScopedMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+)
 
 
 class SupplierStatus(str, Enum):

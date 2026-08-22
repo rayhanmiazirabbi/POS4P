@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.context import RequestContext
 from app.db import get_session
 from app.errors import Forbidden, Unauthorized, ValidationError
-from app.models import OrganizationUser, RecordStatus, Role, Session as SessionModel, Store, User
+from app.models import OrganizationUser, RecordStatus, Role, Store, User
+from app.models import Session as SessionModel
 from app.security import as_utc, utc_now
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -77,12 +78,24 @@ async def resolve_context(
         if store is None or store.organization_id != organization_id:
             raise Forbidden("Store access denied")
 
+    if device_id is not None:
+        # A wiped or stolen terminal must stop working immediately, not when its
+        # access token happens to expire.
+        from app.models import Device, DeviceStatus
+
+        device = await session.get(Device, device_id)
+        if device is None or device.organization_id != organization_id:
+            raise Forbidden("Device access denied")
+        if device.status is not DeviceStatus.ACTIVE:
+            raise Forbidden("Device authorization has been revoked")
+
     context = RequestContext(
         organization_id=organization_id,
         user_id=user_id,
         role=membership.role,
         store_id=store_id,
         device_id=device_id,
+        session_id=session_id,
     )
     request.state.context = context
     return context
