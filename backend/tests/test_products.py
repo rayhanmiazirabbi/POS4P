@@ -377,3 +377,103 @@ async def test_inventory_staff_may_read_but_not_manage(
         client, tenant["store"].id, headers, product_id
     )
     assert denied_enable.status_code == 403
+
+
+# --- the shelf a counter caches ---------------------------------------------
+
+
+async def test_shelf_carries_the_product_name_and_barcode(
+    client: Any, tenant: dict[str, Any], auth_headers: Any
+) -> None:
+    """The two fields a counter cannot sell without, one join away from the row.
+
+    Both used to be missing, and each cost something different. Without ``name``
+    every till listed bare SKUs, so a cashier picked ``PARA-500`` by memory. Without
+    ``barcode`` a scan had nothing on the device to match against -- which defeats
+    the cached shelf entirely, since the point of caching is selling through an
+    outage and a scanner that must ask the server cannot do that.
+    """
+    product_id = await _create_pharmacy_product(
+        client, auth_headers(tenant), name="Paracetamol 500mg", barcode="8901234567890"
+    )
+    enabled = await _enable_store_product(
+        client, tenant["store"].id, auth_headers(tenant), product_id, sku="PARA-500", rack="A1"
+    )
+    assert enabled.status_code == 201
+
+    shelf = await client.get("/products/current", headers=auth_headers(tenant))
+    assert shelf.status_code == 200
+    item = shelf.json()["data"]["items"][0]
+    assert item["name"] == "Paracetamol 500mg"
+    assert item["barcode"] == "8901234567890"
+    # Still a superset of the shelf row, so the management screens on the same
+    # endpoint keep the fields they read.
+    assert item["sku"] == "PARA-500"
+    assert item["salePrice"] == "25.00"
+    assert item["rack"] == "A1"
+
+
+async def test_shelf_omits_a_product_withdrawn_organization_wide(
+    client: Any, tenant: dict[str, Any], auth_headers: Any
+) -> None:
+    """A product deactivated for the whole organization is not sellable anywhere.
+
+    The two active flags mean different things -- the shelf row says "this branch
+    stocks it", the product says "we sell this at all" -- so a branch that left its
+    row switched on must not keep offering a withdrawn line. It holds even for
+    ``includeInactive``, which is asking about shelf rows, not about the product.
+    """
+    product_id = await _create_pharmacy_product(
+        client, auth_headers(tenant), name="Recalled Syrup", barcode="8909999999999"
+    )
+    assert (
+        await _enable_store_product(
+            client, tenant["store"].id, auth_headers(tenant), product_id, sku="RECALL-1"
+        )
+    ).status_code == 201
+    withdrawn = await client.patch(
+        f"/products/{product_id}/status", json={"active": False}, headers=auth_headers(tenant)
+    )
+    assert withdrawn.status_code == 200
+
+    shelf = await client.get("/products/current", headers=auth_headers(tenant))
+    assert shelf.json()["data"]["items"] == []
+    with_inactive = await client.get(
+        "/products/current", params={"includeInactive": True}, headers=auth_headers(tenant)
+    )
+    assert with_inactive.json()["data"]["items"] == []
+
+
+async def test_shelf_is_scoped_to_the_branch_the_token_is_pinned_to(
+    client: Any,
+    session: AsyncSession,
+    tenant: dict[str, Any],
+    auth_headers: Any,
+    make_organization: Callable[..., Any],
+    make_user: Callable[..., Any],
+    make_store: Callable[..., Any],
+    make_membership: Callable[..., Any],
+) -> None:
+    """One tenant's shelf never appears on another's counter.
+
+    Worth pinning here specifically because this list is the one the clients cache
+    to disk: a leak would not just be shown once, it would be kept.
+    """
+    from tests.test_stores import _bearer
+
+    product_id = await _create_pharmacy_product(
+        client, auth_headers(tenant), name="Ours", barcode="8901111111111"
+    )
+    assert (
+        await _enable_store_product(
+            client, tenant["store"].id, auth_headers(tenant), product_id, sku="OURS-1"
+        )
+    ).status_code == 201
+
+    other = await _second_tenant(session, make_organization, make_user, make_store, make_membership)
+    rival_headers = _bearer(
+        other["session"], other["owner"], other["organization"], store=other["store"], role=Role.OWNER
+    )
+    rival_shelf = await client.get("/products/current", headers=rival_headers)
+    assert rival_shelf.status_code == 200
+    assert rival_shelf.json()["data"]["items"] == []

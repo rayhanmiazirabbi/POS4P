@@ -17,7 +17,7 @@ const EXPECTED: Record<Role, readonly Capability[]> = {
   owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read', 'reports.read_costs'],
   manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read', 'reports.read_costs'],
   cashier: ['sales.create', 'inventory.read', 'reports.read'],
-  inventory_staff: ['inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read'],
+  inventory_staff: ['inventory.read', 'inventory.adjust', 'reports.read'],
 };
 
 describe('role × capability matrix', () => {
@@ -34,6 +34,25 @@ describe('role × capability matrix', () => {
     expect(can('cashier', 'reports.read_costs')).toBe(false);
     expect(can('inventory_staff', 'reports.read_costs')).toBe(false);
     expect(can('inventory_staff', 'sales.refund')).toBe(false);
+  });
+
+  it('never grants purchasing to a role that may not read costs', () => {
+    // Entering a purchase is entering supplier unit costs, so the two grants have
+    // to move together. `inventory_staff` used to hold `purchases.manage` while
+    // being denied `reports.read_costs`: the same figures were hidden on the
+    // dashboard and typed line by line on the purchasing screen. The backend
+    // guards `POST /purchases` at owner/manager, so the grant was also a promise
+    // of a screen the server answers 403 to.
+    for (const role of ROLES) {
+      if (can(role, 'purchases.manage')) expect(can(role, 'reports.read_costs'), role).toBe(true);
+    }
+  });
+
+  it('leaves inventory_staff able to receive stock', () => {
+    // Purchasing left, receiving stayed. Removing both would have made the role
+    // unable to do the work it is named for.
+    expect(can('inventory_staff', 'inventory.adjust')).toBe(true);
+    expect(can('inventory_staff', 'purchases.manage')).toBe(false);
   });
 });
 

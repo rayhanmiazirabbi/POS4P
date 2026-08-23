@@ -11,8 +11,14 @@ export type StorageAdapter = {
   remove(key: string): Promise<void>;
 };
 
-/** Storage keys this package reads. Auth owns writing them. */
-export const storageKeys = { accessToken: 'access_token', refreshToken: 'refresh_token', session: 'session' } as const;
+/**
+ * Storage keys this package reads. Auth owns writing the token pair.
+ *
+ * `deviceKey` is deliberately not a session key: it identifies the installation
+ * and must survive sign-out, or every shift change registers a new device and
+ * restarts its sync sequence stream.
+ */
+export const storageKeys = { accessToken: 'access_token', refreshToken: 'refresh_token', session: 'session', deviceKey: 'device_key' } as const;
 
 /** In-memory adapter for tests and ephemeral sessions. */
 export function createMemoryStorage(initial: Readonly<Record<string, string>> = {}): StorageAdapter {

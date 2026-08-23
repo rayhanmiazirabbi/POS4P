@@ -81,7 +81,7 @@ async def list_purchases(
     context: ContextDep,
     request_id: RequestIdDep,
     purchase_status: Annotated[PurchaseStatus | None, Query(alias="status")] = None,
-    supplier_id: UUID | None = None,
+    supplier_id: Annotated[UUID | None, Query(alias="supplierId")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Envelope[Page[PurchaseResponse]]:

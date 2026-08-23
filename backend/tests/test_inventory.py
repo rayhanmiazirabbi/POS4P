@@ -1,25 +1,27 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from app.context import RequestContext
-from app.domains.inventory import InventoryMovementType
-from app.services.inventory import InsufficientStock
+from app.domains.inventory import InventoryBatch, InventoryMovementType
 from app.main import app
 from app.models import Organization, Role, StoreProduct
 from app.services.inventory import (
+    InsufficientStock,
     adjust_stock,
     allocate_fefo_for_product,
     consume_allocations,
-    receive_batch,
     rebuild_balances_from_ledger,
+    receive_batch,
 )
+from app.services.stores import business_date
 from tests.conftest import access_token_for
 
 KEY = "idempotency-receive-key-000001"
@@ -167,6 +169,46 @@ async def test_fefo_allocation_skips_expired_and_orders_by_expiry(
     assert "EXPIRED" not in numbers
 
 
+@pytest.mark.parametrize("utc_hour", [12, 20])
+async def test_fefo_expiry_cutoff_uses_the_store_calendar_not_utc(
+    session: Any, tenant: dict[str, Any], monkeypatch: Any, utc_hour: int
+) -> None:
+    """Overnight, a batch that expired must stay un-dispensable.
+
+    Every other FEFO test passes ``as_of`` explicitly, so none of them exercise the
+    default -- which is the path the POS actually uses. On UTC that default lags the
+    branch's own date from 18:00 to midnight (00:00-06:00 in Dhaka), leaving a batch
+    that expired overnight eligible until dawn. Dispensing expired medicine is the
+    single failure FEFO exists to prevent, so the boundary is pinned here rather
+    than left to whichever hour the suite happens to run at.
+    """
+    frozen = datetime(2026, 8, 22, utc_hour, 30, tzinfo=UTC)
+    monkeypatch.setattr("app.services.stores.utc_now", lambda: frozen)
+
+    store_today = business_date(tenant["store"])
+    sp = await _make_store_product(session, tenant)
+    await _receive(
+        session, tenant, sp, "5", batch_number="OLD", expiry_date=store_today - timedelta(days=1)
+    )
+    await _receive(
+        session, tenant, sp, "5", batch_number="GOOD", expiry_date=store_today + timedelta(days=30)
+    )
+    await session.commit()
+
+    # No explicit as_of: this is the call the till makes.
+    result = await allocate_fefo_for_product(session, _context(tenant), sp.id, Decimal("5"))
+    assert result.ok is True
+    assert result.allocated == Decimal("5")
+
+    batches = {
+        b.id: b.batch_number
+        for b in await session.scalars(
+            select(InventoryBatch).where(InventoryBatch.store_product_id == sp.id)
+        )
+    }
+    assert [batches[a.batch_id] for a in result.allocations] == ["GOOD"]
+
+
 async def test_insufficient_stock_returns_explicit_shortfall_and_consume_rejects(
     session: Any, tenant: dict[str, Any]
 ) -> None:
@@ -245,9 +287,10 @@ async def test_adjustment_endpoint_requires_manager_role(
 ) -> None:
     sp = await _make_store_product(session, tenant)
     await _receive(session, tenant, sp, "10")
+    from datetime import timedelta
+
     from app.models import Session as SessionModel
     from app.security import generate_token, hash_token, utc_now
-    from datetime import timedelta
 
     cashier = await make_user(phone="+8801700000031", display_name="Cashier")
     await make_membership(tenant["organization"], cashier, Role.CASHIER, tenant["store"])

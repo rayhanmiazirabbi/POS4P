@@ -14,6 +14,7 @@ from app.schemas.products import (
     PharmacyProductResponse,
     PharmacyProductStatusRequest,
     PharmacyProductUpdateRequest,
+    ShelfItemResponse,
     StoreProductEnableRequest,
     StoreProductPriceResponse,
     StoreProductResponse,
@@ -62,6 +63,41 @@ async def create_pharmacy_product(
 ) -> Envelope[PharmacyProductResponse]:
     product = await service.create_pharmacy_product(session, context, payload, request_id=request_id)
     return Envelope(data=PharmacyProductResponse.model_validate(product), request_id=request_id)
+
+
+@router.get("/current", response_model=Envelope[Page[ShelfItemResponse]])
+async def list_current_store_products(
+    session: SessionDep,
+    context: ContextDep,
+    request_id: RequestIdDep,
+    includeInactive: Annotated[bool, Query()] = False,
+) -> Envelope[Page[ShelfItemResponse]]:
+    """Shelf list for the branch the token is pinned to.
+
+    **Declared before ``/{product_id}``, and it has to stay there.** FastAPI matches
+    in declaration order, so with the literal route second every request for this
+    path was handed to ``read_pharmacy_product``, which tried to parse ``"current"``
+    as a UUID and answered 422. This is the list every counter loads at startup, so
+    the shelf was empty on all three shells -- and the clients each reported it as
+    "shelf is empty or unavailable", which reads like a shop with no stock rather
+    than a broken route. No test covered the endpoint, so nothing said otherwise.
+    """
+    store = await load_current_store(session, context)
+    rows = await service.list_shelf(session, context, store, include_inactive=includeInactive)
+    # The product's name and barcode are folded in rather than left a join away:
+    # this list is what a device caches to sell offline, and a scan it has to ask
+    # the server about is a scan that does not work during an outage.
+    items = [
+        ShelfItemResponse.model_validate(
+            {
+                **StoreProductResponse.model_validate(shelf_row).model_dump(),
+                "name": product.name,
+                "barcode": product.barcode,
+            }
+        )
+        for shelf_row, product in rows
+    ]
+    return Envelope(data=Page(items=items, total=len(items)), request_id=request_id)
 
 
 @router.get("/{product_id}", response_model=Envelope[PharmacyProductResponse])
@@ -137,20 +173,6 @@ async def enable_store_product(
         session, context, store, payload, request_id=request_id
     )
     return Envelope(data=StoreProductResponse.model_validate(row), request_id=request_id)
-
-
-@router.get("/current", response_model=Envelope[Page[StoreProductResponse]])
-async def list_current_store_products(
-    session: SessionDep,
-    context: ContextDep,
-    request_id: RequestIdDep,
-    includeInactive: Annotated[bool, Query()] = False,
-) -> Envelope[Page[StoreProductResponse]]:
-    """Shelf list for the branch the token is pinned to."""
-    store = await load_current_store(session, context)
-    rows = await service.list_store_products(session, context, store, include_inactive=includeInactive)
-    items = [StoreProductResponse.model_validate(row) for row in rows]
-    return Envelope(data=Page(items=items, total=len(items)), request_id=request_id)
 
 
 @router.patch("/stores/{store_id}/{row_id}", response_model=Envelope[StoreProductResponse])

@@ -1,6 +1,11 @@
 export type TauriCommand<Arguments extends unknown[], Result> = (...args: Arguments) => Promise<Result>;
 
-export type SqliteStore = {
+/**
+ * The durable key-value store the shell persists to. Inside Tauri this is a
+ * SQLite database via the `store_*` commands; the browser dev fallback is
+ * localStorage, so the name stays backend-neutral.
+ */
+export type LocalStore = {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
   remove(key: string): Promise<void>;
@@ -13,7 +18,7 @@ export type HardwareAdapters = {
 };
 
 export type DesktopPlatform = {
-  database: SqliteStore;
+  database: LocalStore;
   hardware: HardwareAdapters;
 };
 

@@ -23,7 +23,7 @@ from app.errors import DomainError, Forbidden, NotFound, ValidationError
 from app.models import Role, StoreProduct
 from app.security import utc_now
 from app.services.audit import record_audit, redact
-from app.services.stores import load_store
+from app.services.stores import business_date, load_store
 
 #: Receiving stock is inventory work; only adjustments escalate to OWNER/MANAGER.
 INVENTORY_ROLES = frozenset({Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF})
@@ -229,7 +229,12 @@ async def receive_batch(
 async def list_batches_fefo(
     session: AsyncSession, context: RequestContext, store_product_id: UUID, *, as_of: date | None = None
 ) -> list[BatchStock]:
-    """Batches in FEFO order with their computed available quantity."""
+    """Batches in FEFO order with their computed available quantity.
+
+    Expired batches are *not* filtered here -- ``allocate_fefo`` decides eligibility
+    so that stock-on-hand views can still show what is on the shelf awaiting
+    disposal. Callers wanting only dispensable stock should allocate.
+    """
     store_product = await load_store_product(session, context, store_product_id)
     batches = list(
         await session.scalars(
@@ -237,7 +242,6 @@ async def list_batches_fefo(
         )
     )
     available_by_batch = await _batch_available_map(session, store_product)
-    today = as_of or utc_now().date()
     stocks = [
         BatchStock(
             batch_id=batch.id,
@@ -271,11 +275,21 @@ async def allocate_fefo_for_product(
 
     Returns an explicit shortfall so callers can decide between failing and
     partially consuming; it never permits negative stock.
+
+    Eligibility is judged on the *branch's* calendar day. On UTC, a store east of
+    Greenwich spends the hours after its own midnight still reading yesterday's
+    date, and a batch that expired overnight stays dispensable -- for ``Asia/Dhaka``
+    that is every night between 00:00 and 06:00 local. Expired medicine reaching a
+    patient is the failure this ordering exists to prevent, so the cutoff has to
+    come from the same clock the shop is working to.
     """
     if quantity < 0:
         raise ValidationError("Requested quantity cannot be negative")
-    stocks = await list_batches_fefo(session, context, store_product_id, as_of=as_of)
-    allocations, remaining = allocate_fefo(stocks, quantity, as_of or utc_now().date())
+    store_product = await load_store_product(session, context, store_product_id)
+    store = await load_store(session, context, store_product.store_id)
+    cutoff = as_of or business_date(store)
+    stocks = await list_batches_fefo(session, context, store_product_id, as_of=cutoff)
+    allocations, _remaining = allocate_fefo(stocks, quantity, cutoff)
     return AllocationResult(requested=quantity, allocations=allocations)
 
 
@@ -437,7 +451,10 @@ async def expiring_batches(
     if within_days < 0:
         raise ValidationError("within_days must be non-negative")
     store = await load_store(session, context, store_id)
-    cutoff = utc_now().date() + timedelta(days=within_days)
+    # Expiry is a calendar fact for the branch, so the window starts on the branch's
+    # own trading day. On UTC it would shift by one for any store east of Greenwich,
+    # and "expires in 30 days" would be answered against the wrong calendar.
+    cutoff = business_date(store) + timedelta(days=within_days)
     batches = list(
         await session.scalars(
             select(InventoryBatch)

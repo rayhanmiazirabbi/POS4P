@@ -8,7 +8,13 @@
     "@pharmacy/types": "workspace:*",
     "@tauri-apps/api": "^2.11.1",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "@pharmacy/api": "workspace:*",
+    "@pharmacy/auth": "workspace:*",
+    "@pharmacy/money": "workspace:*",
+    "@pharmacy/permissions": "workspace:*",
+    "@pharmacy/sales": "workspace:*",
+    "@pharmacy/sync": "workspace:*"
   },
   "devDependencies": {
     "@types/react": "^19.2.7",

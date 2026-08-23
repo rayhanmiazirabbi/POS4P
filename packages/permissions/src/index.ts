@@ -6,11 +6,22 @@ export type Capability =
   | 'sales.refund' | 'inventory.read' | 'inventory.adjust' | 'purchases.manage'
   | 'reports.read' | 'reports.read_costs';
 
+/**
+ * The single answer to "may this role do that".
+ *
+ * `purchases.manage` deliberately stops at manager. Entering a purchase *is*
+ * entering supplier unit costs, so granting it to a role that is denied
+ * `reports.read_costs` would contradict this same table: costs hidden on the
+ * dashboard, then typed and read line by line on the purchasing screen. The
+ * backend already enforces owner/manager on `POST /purchases`, so the grant only
+ * ever promised inventory staff a screen the server answers 403 to.
+ * Receiving stock is separate and still theirs, via `inventory.adjust`.
+ */
 const matrix: Record<Role, readonly Capability[]> = {
   owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read', 'reports.read_costs'],
   manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read', 'reports.read_costs'],
   cashier: ['sales.create', 'inventory.read', 'reports.read'],
-  inventory_staff: ['inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read'],
+  inventory_staff: ['inventory.read', 'inventory.adjust', 'reports.read'],
 };
 
 export function can(role: Role, capability: Capability): boolean { return matrix[role]?.includes(capability) ?? false; }

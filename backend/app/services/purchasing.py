@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -12,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.context import RequestContext
 from app.domains.inventory import InventoryMovementType
 from app.domains.purchasing import Purchase, PurchaseItem, PurchaseStatus
-from app.errors import Conflict, NotFound
+from app.errors import Conflict, NotFound, ValidationError
 from app.models import Role
 from app.schemas.purchasing import PurchaseCreateRequest, PurchaseReturnRequest
 from app.security import utc_now
@@ -392,5 +391,8 @@ async def get_purchase_with_items(
     return purchase, await _load_items(session, purchase.id)
 
 
-def today() -> date:
-    return datetime.now().date()
+def require_idempotency_key(idempotency_key: str | None) -> str:
+    """Shared header guard; mirrors the FastAPI dependency in ``routers.purchasing``."""
+    if not idempotency_key or not 16 <= len(idempotency_key.strip()) <= 128:
+        raise ValidationError("Idempotency-Key must be between 16 and 128 characters")
+    return idempotency_key.strip()

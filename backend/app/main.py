@@ -8,12 +8,17 @@ from app.errors import register_exception_handlers
 from app.routers import (
     auth_router,
     catalog_router,
+    customers_router,
     inventory_router,
     organizations_router,
+    payments_router,
     products_router,
     purchasing_router,
+    reports_router,
+    sales_router,
     stores_router,
     suppliers_router,
+    sync_router,
     users_router,
 )
 
@@ -41,6 +46,11 @@ for router in (
     suppliers_router,
     inventory_router,
     purchasing_router,
+    customers_router,
+    payments_router,
+    sales_router,
+    reports_router,
+    sync_router,
 ):
     app.include_router(router)
 

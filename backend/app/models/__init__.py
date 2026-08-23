@@ -32,7 +32,7 @@ from app.domains.purchasing import Purchase, PurchaseItem
 from app.domains.reports import DailyStoreMetric, StoreExpense
 from app.domains.sales import Sale, SaleItem, SaleItemBatchAllocation, SaleReturn
 from app.domains.suppliers import Supplier, SupplierLedgerEntry, SupplierProduct
-from app.domains.sync import Device, DeviceStatus, SyncCheckpoint, SyncEvent
+from app.domains.sync import Device, DeviceStatus, StoreSequence, SyncCheckpoint, SyncEvent, SyncFeedItem
 from app.models.base import Base
 from app.models.cross_cutting import AuditLog, IdempotencyRecord, OutboxEvent
 from app.models.identity import (
@@ -109,7 +109,9 @@ __all__ = [
     "Supplier",
     "SupplierLedgerEntry",
     "SupplierProduct",
+    "StoreSequence",
     "SyncCheckpoint",
     "SyncEvent",
+    "SyncFeedItem",
     "User",
 ]

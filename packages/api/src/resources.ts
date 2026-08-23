@@ -1,4 +1,4 @@
-import type { ApiResponse, Currency, EntityStatus, Membership, Organization, Pagination, Role, Store, StoreMembership, User } from '@pharmacy/types';
+import type { ApiResponse, Currency, EntityStatus, Membership, Organization, Pagination, PaymentMethod, Role, Store, StoreMembership, User } from '@pharmacy/types';
 
 import type { ApiClient, RequestOptions } from './client';
 import type { Page } from './pagination';
@@ -124,7 +124,10 @@ export type PinLoginRequest = { phone: string; pin: string; organizationId: stri
 export type RefreshRequest = { refreshToken: string };
 export type SelectContextRequest = { organizationId: string; storeId?: string; device?: DeviceClaim };
 
-export type MembershipOption = { organizationId: string; organizationName: string; role: Role; storeIds: readonly string[] };
+/** Mirrors `MembershipStore`: a branch named well enough to put on a button. */
+export type MembershipStore = { id: string; code: string; name: string };
+
+export type MembershipOption = { organizationId: string; organizationName: string; role: Role; stores: readonly MembershipStore[] };
 
 /** Mirrors `TokenResponse`: the credential pair plus the context-selection shell. */
 export type TokenBundle = {
@@ -329,6 +332,15 @@ export type PharmacyApi = {
   organizations: OrganizationsClient;
   stores: StoresClient;
   users: UsersClient;
+  products: ProductsClient;
+  inventory: InventoryClient;
+  purchases: PurchasesClient;
+  suppliers: SuppliersClient;
+  sales: SalesClient;
+  payments: PaymentsClient;
+  customers: CustomersClient;
+  reports: ReportsClient;
+  sync: SyncClient;
 };
 
 export function createPharmacyApi(client: ApiClient): PharmacyApi {
@@ -338,5 +350,467 @@ export function createPharmacyApi(client: ApiClient): PharmacyApi {
     organizations: createOrganizationsClient(client),
     stores: createStoresClient(client),
     users: createUsersClient(client),
+    products: createProductsClient(client),
+    inventory: createInventoryClient(client),
+    purchases: createPurchasesClient(client),
+    suppliers: createSuppliersClient(client),
+    sales: createSalesClient(client),
+    payments: createPaymentsClient(client),
+    customers: createCustomersClient(client),
+    reports: createReportsClient(client),
+    sync: createSyncClient(client),
+  };
+}
+
+// --- POS phase: products, sales, payments, customers, reports, sync -------------
+
+export type StoreProduct = {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  pharmacyProductId: string;
+  sku: string;
+  /** Decimal serialized as a fixed-cents string, e.g. `"10.00"`. */
+  salePrice: string;
+  minimumStock: string;
+  rack?: string | null;
+  active: boolean;
+  createdAt: string;
+};
+
+/**
+ * Mirrors `ShelfItemResponse`: a shelf row with the product it sells folded in.
+ *
+ * What `GET /products/current` answers. The extra two fields are the ones a
+ * counter cannot work without -- `name`, because a cashier picking from a list of
+ * bare SKUs is picking from memory, and `barcode`, because a scan has to resolve
+ * on the device for the cached shelf to be worth caching.
+ */
+export type ShelfItem = StoreProduct & { name: string; barcode?: string | null };
+
+export type SaleStatus = 'completed' | 'voided' | 'refunded';
+export type SaleChannel = 'pos' | 'online';
+/** Re-exported from `@pharmacy/types` so the wire, the reports and the backend enum cannot drift apart. */
+export type { PaymentMethod };
+export type PaymentStatus = 'pending' | 'captured' | 'failed' | 'refunded';
+
+export type Payment = {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  referenceType: string;
+  referenceId: string;
+  customerId?: string | null;
+  method: PaymentMethod;
+  amount: string;
+  receivedAmount?: string | null;
+  status: PaymentStatus;
+  providerReference?: string | null;
+  createdAt: string;
+};
+
+export type SaleItem = {
+  id: string;
+  storeProductId: string;
+  productName: string;
+  quantity: string;
+  unitPrice: string;
+  lineTotal: string;
+};
+
+export type Sale = {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  customerId?: string | null;
+  channel: SaleChannel;
+  status: SaleStatus;
+  subtotal: string;
+  discount: string;
+  total: string;
+  receiptNumber?: string | null;
+  voidReason?: string | null;
+  createdAt: string;
+  items: readonly SaleItem[];
+  payments: readonly Payment[];
+};
+
+export type SalePaymentInput = {
+  method: PaymentMethod;
+  amount: string;
+  receivedAmount?: string;
+  providerReference?: string;
+};
+
+export type SaleCreateRequest = {
+  customerId?: string | null;
+  discount?: string;
+  items: readonly { storeProductId: string; quantity: string }[];
+  payments: readonly SalePaymentInput[];
+  /** Client display echo only; the server always recomputes from shelf prices. */
+  subtotal?: string;
+  total?: string;
+};
+
+export type SaleReturnRequest = { reason: string; lines: readonly { saleItemId: string; quantity: string }[] };
+
+export type SaleListFilters = { customerId?: string; status?: SaleStatus };
+
+export type SalesClient = {
+  list(filters?: SaleListFilters, pagination?: Pagination, options?: RequestOptions): Promise<Page<Sale>>;
+  read(saleId: string, options?: RequestOptions): Promise<ApiResponse<Sale>>;
+  /** Requires an idempotency key (send one via `options.idempotencyKey`). */
+  create(body: SaleCreateRequest, options?: RequestOptions): Promise<ApiResponse<Sale>>;
+  createReturn(saleId: string, body: SaleReturnRequest, options?: RequestOptions): Promise<ApiResponse<{ id: string; saleId: string; reason: string; total: string; createdAt: string }>>;
+  void(saleId: string, body: { reason: string }, options?: RequestOptions): Promise<ApiResponse<Sale>>;
+};
+
+export function createSalesClient(client: ApiClient): SalesClient {
+  return {
+    list: (filters = {}, pagination = {}, options = {}) =>
+      client.list<Sale>('/sales', pagination, {
+        ...options,
+        query: { ...options.query, customerId: filters.customerId, status: filters.status },
+      }),
+    read: (saleId, options = {}) => client.get<Sale>(`/sales/${segment(saleId)}`, options),
+    create: (body, options = {}) => client.post<Sale>('/sales', body, options),
+    createReturn: (saleId, body, options = {}) =>
+      client.post<{ id: string; saleId: string; reason: string; total: string; createdAt: string }>(
+        `/sales/${segment(saleId)}/returns`,
+        body,
+        options,
+      ),
+    void: (saleId, body, options = {}) =>
+      client.post<Sale>(`/sales/${segment(saleId)}/void`, body, options),
+  };
+}
+
+export type PaymentsClient = {
+  list(
+    filters?: { referenceType?: string; referenceId?: string; customerId?: string; method?: PaymentMethod; status?: PaymentStatus },
+    pagination?: Pagination,
+    options?: RequestOptions,
+  ): Promise<Page<Payment>>;
+  read(paymentId: string, options?: RequestOptions): Promise<ApiResponse<Payment>>;
+  updateStatus(paymentId: string, body: { status: PaymentStatus; providerReference?: string }, options?: RequestOptions): Promise<ApiResponse<Payment>>;
+};
+
+export function createPaymentsClient(client: ApiClient): PaymentsClient {
+  return {
+    list: (filters = {}, pagination = {}, options = {}) =>
+      client.list<Payment>('/payments', pagination, {
+        ...options,
+        query: {
+          ...options.query,
+          referenceType: filters.referenceType,
+          referenceId: filters.referenceId,
+          customerId: filters.customerId,
+          method: filters.method,
+          status: filters.status,
+        },
+      }),
+    read: (paymentId, options = {}) => client.get<Payment>(`/payments/${segment(paymentId)}`, options),
+    updateStatus: (paymentId, body, options = {}) =>
+      client.post<Payment>(`/payments/${segment(paymentId)}/status`, body, options),
+  };
+}
+
+export type Customer = {
+  id: string;
+  organizationId: string;
+  name: string;
+  normalizedPhone?: string | null;
+  email?: string | null;
+  dueBalance: string;
+  preferences: Record<string, unknown>;
+  active: boolean;
+  createdAt: string;
+};
+
+/**
+ * The field is `normalizedPhone`, not `phone`: the server canonicalises whatever
+ * dialing form is sent (`01712345678`, `+8801712345678`) onto `+8801XXXXXXXXX` and
+ * stores it under that name. Request models forbid unknown keys, so sending `phone`
+ * is a 422 rather than a silently dropped field.
+ */
+export type CustomerCreateRequest = { name: string; normalizedPhone?: string; email?: string; preferences?: Record<string, unknown> };
+export type CustomerUpdateRequest = { name?: string; normalizedPhone?: string; email?: string; preferences?: Record<string, unknown> };
+/** `totalSpent` is null when the caller's role may not see lifetime spend; `totalDue` is always populated so a cashier can take a payment against it. */
+export type CustomerHistorySummary = { customerId: string; saleCount: number; totalSpent?: string | null; totalRefunded: string; totalDue: string };
+export type CustomerAddress = { id: string; customerId: string; label: string; addressLine: string; city?: string | null; postalCode?: string | null; active: boolean; createdAt: string };
+export type CustomerAddressCreateRequest = { label: string; addressLine: string; city?: string; postalCode?: string };
+/** Omitting `active` means active-only; `hasDue` narrows within that rather than replacing it. */
+export type CustomerFilters = { q?: string; active?: boolean; hasDue?: boolean };
+
+export type CustomersClient = {
+  search(query: CustomerFilters, pagination?: Pagination, options?: RequestOptions): Promise<Page<Customer>>;
+  create(body: CustomerCreateRequest, options?: RequestOptions): Promise<ApiResponse<Customer>>;
+  read(customerId: string, options?: RequestOptions): Promise<ApiResponse<Customer>>;
+  update(customerId: string, body: CustomerUpdateRequest, options?: RequestOptions): Promise<ApiResponse<Customer>>;
+  deactivate(customerId: string, options?: RequestOptions): Promise<ApiResponse<Customer>>;
+  history(customerId: string, options?: RequestOptions): Promise<ApiResponse<CustomerHistorySummary>>;
+  /** Recompute `dueBalance` from the payment ledger; owner/manager only, and idempotent. */
+  rebuildDueBalance(customerId: string, options?: RequestOptions): Promise<ApiResponse<Customer>>;
+  /** Delivery addresses. The list is active-only; there is no server-side edit, so correcting one means adding a replacement. */
+  listAddresses(customerId: string, options?: RequestOptions): Promise<ApiResponse<CustomerAddress[]>>;
+  createAddress(customerId: string, body: CustomerAddressCreateRequest, options?: RequestOptions): Promise<ApiResponse<CustomerAddress>>;
+};
+
+export function createCustomersClient(client: ApiClient): CustomersClient {
+  return {
+    search: ({ q, active, hasDue }, pagination = {}, options = {}) =>
+      client.list<Customer>('/customers', pagination, { ...options, query: { ...options.query, q, active, hasDue } }),
+    create: (body, options = {}) => client.post<Customer>('/customers', body, options),
+    read: (customerId, options = {}) => client.get<Customer>(`/customers/${segment(customerId)}`, options),
+    update: (customerId, body, options = {}) => client.patch<Customer>(`/customers/${segment(customerId)}`, body, options),
+    deactivate: (customerId, options = {}) => client.delete<Customer>(`/customers/${segment(customerId)}`, options),
+    history: (customerId, options = {}) =>
+      client.get<CustomerHistorySummary>(`/customers/${segment(customerId)}/history`, options),
+    rebuildDueBalance: (customerId, options = {}) =>
+      client.post<Customer>(`/customers/${segment(customerId)}/due/rebuild`, {}, options),
+    listAddresses: (customerId, options = {}) =>
+      client.get<CustomerAddress[]>(`/customers/${segment(customerId)}/addresses`, options),
+    createAddress: (customerId, body, options = {}) =>
+      client.post<CustomerAddress>(`/customers/${segment(customerId)}/addresses`, body, options),
+  };
+}
+
+export type TodayMetrics = {
+  /** The store-local trading day these figures cover, honouring its cutoff hour. */
+  businessDate: string;
+  salesTotal: string;
+  refundTotal: string;
+  netSalesTotal: string;
+  transactionCount: number;
+  /**
+   * Net movement per tender, keyed on the payment and refund timestamps rather than
+   * the sale's. A line can be negative: a morning spent refunding last night's big
+   * sale really does leave the drawer down, and clamping that at zero is what makes
+   * a till stop reconciling.
+   */
+  paymentBreakdown: Record<string, string>;
+  /** Money that actually moved: captured payments less refunds, excluding `due`. */
+  collectedTotal: string;
+  /** Credit extended today -- owed by customers, not in the drawer. */
+  dueTotal: string;
+  expenseTotal: string;
+  /** Null when the caller's role is not allowed to see cost/profit. */
+  profit?: string | null;
+  asOf: string;
+};
+
+/** A rebuilt `daily_store_metrics` projection, reconciled against the ledgers. */
+export type DailyMetric = {
+  storeId: string;
+  metricDate: string;
+  salesTotal: string;
+  refundTotal: string;
+  costTotal: string;
+  paymentBreakdown: Record<string, string>;
+  /**
+   * Derived from `paymentBreakdown` by the same code path as `TodayMetrics`, so a
+   * rebuilt day and a live day cannot disagree about what the drawer should hold.
+   */
+  collectedTotal: string;
+  rebuiltAt: string;
+};
+
+/** `productName` falls back to the SKU server-side, so it is never null. */
+export type LowStockItem = { storeProductId: string; sku: string; productName: string; available: string; minimumStock: string };
+/** `daysUntilExpiry` is counted from the branch's trading day, not UTC, so it does not shift for a store east of Greenwich. */
+export type ExpiryWarning = { batchId: string; storeProductId: string; sku: string; productName: string; batchNumber: string; expiryDate: string; available: string; daysUntilExpiry: number };
+export type Expense = { id: string; storeId: string; category: string; amount: string; expenseDate: string; note?: string | null; createdByUserId?: string | null; createdAt: string };
+export type ExpenseCreateRequest = { category: string; amount: string; expenseDate: string; note?: string };
+export type ExpenseFilters = { from?: string; to?: string };
+
+export type ReportsClient = {
+  /** `asOf` selects a past trading day, e.g. closing yesterday's books after midnight. */
+  today(asOf?: string, options?: RequestOptions): Promise<ApiResponse<TodayMetrics>>;
+  rebuildDailyMetric(asOf?: string, options?: RequestOptions): Promise<ApiResponse<DailyMetric>>;
+  lowStock(options?: RequestOptions): Promise<ApiResponse<readonly LowStockItem[]>>;
+  expiry(withinDays?: number, options?: RequestOptions): Promise<ApiResponse<readonly ExpiryWarning[]>>;
+  listExpenses(filters?: ExpenseFilters, pagination?: Pagination, options?: RequestOptions): Promise<Page<Expense>>;
+  createExpense(body: ExpenseCreateRequest, options?: RequestOptions): Promise<ApiResponse<Expense>>;
+};
+
+export function createReportsClient(client: ApiClient): ReportsClient {
+  return {
+    today: (asOf, options = {}) =>
+      client.get<TodayMetrics>('/reports/today', { ...options, query: { ...options.query, asOf } }),
+    rebuildDailyMetric: (asOf, options = {}) =>
+      client.post<DailyMetric>('/reports/daily-metrics/rebuild', undefined, {
+        ...options,
+        query: { ...options.query, asOf },
+      }),
+    lowStock: (options = {}) => client.get<readonly LowStockItem[]>('/reports/low-stock', options),
+    expiry: (withinDays = 30, options = {}) =>
+      client.get<readonly ExpiryWarning[]>('/reports/expiry', { ...options, query: { ...options.query, withinDays } }),
+    listExpenses: ({ from, to } = {}, pagination = {}, options = {}) =>
+      client.list<Expense>('/reports/expenses', pagination, { ...options, query: { ...options.query, from, to } }),
+    createExpense: (body, options = {}) => client.post<Expense>('/reports/expenses', body, options),
+  };
+}
+
+export type SyncDevice = { id: string; storeId: string; name: string; deviceKey: string; status: DeviceStatus; createdAt: string };
+
+/**
+ * One offline mutation on the wire, mirroring `SyncEventEnvelopeIn`.
+ *
+ * The identity fields are optional on the server but should always be sent. They
+ * are not trusted -- ingest checks each against the bearer token and answers
+ * `IDENTITY_MISMATCH` on disagreement -- which is exactly why they are worth
+ * sending: a queue filled up at one store and flushed after signing in at
+ * another is refused instead of being quietly booked against the second shop's
+ * stock and takings. Omitting them means the token decides, and the token is
+ * whatever the device is holding at flush time.
+ *
+ * Nothing else may be added: the request model forbids unknown keys, so a client
+ * that spreads its own richer envelope onto the wire gets the whole batch
+ * rejected as malformed. `@pharmacy/sync`'s `idempotencyKey` in particular is a
+ * local concern and must be stripped.
+ */
+export type SyncEnvelope = {
+  eventId: string;
+  eventType: string;
+  clientSequence: number;
+  payload: Record<string, unknown>;
+  createdAt?: string;
+  deviceId?: string;
+  organizationId?: string;
+  storeId?: string;
+  userId?: string;
+};
+
+export type SyncAck = { eventId: string; serverSequence?: number | null; duplicate: boolean; errorCode?: string | null };
+export type SyncPullChange = { serverSequence: number; eventType: string; payload: Record<string, unknown>; receivedAt: string };
+
+export type SyncClient = {
+  registerDevice(body: { name: string; deviceKey: string }, options?: RequestOptions): Promise<ApiResponse<SyncDevice>>;
+  listDevices(options?: RequestOptions): Promise<ApiResponse<readonly SyncDevice[]>>;
+  revokeDevice(deviceId: string, options?: RequestOptions): Promise<ApiResponse<SyncDevice>>;
+  ingest(events: readonly SyncEnvelope[], options?: RequestOptions): Promise<ApiResponse<{ acks: readonly SyncAck[] }>>;
+  pull(cursor: number, limit?: number, options?: RequestOptions): Promise<ApiResponse<{ changes: readonly SyncPullChange[]; nextCursor: number; hasMore: boolean }>>;
+};
+
+export function createSyncClient(client: ApiClient): SyncClient {
+  return {
+    registerDevice: (body, options = {}) => client.post<SyncDevice>('/sync/devices', body, options),
+    listDevices: (options = {}) => client.get<readonly SyncDevice[]>('/sync/devices', options),
+    revokeDevice: (deviceId, options = {}) =>
+      client.post<SyncDevice>(`/sync/devices/${segment(deviceId)}/revoke`, undefined, options),
+    ingest: (events, options = {}) => client.post<{ acks: readonly SyncAck[] }>('/sync/events', { events }, options),
+    pull: (cursor, limit = 50, options = {}) =>
+      client.get<{ changes: readonly SyncPullChange[]; nextCursor: number; hasMore: boolean }>('/sync/events', {
+        ...options,
+        query: { ...options.query, cursor, limit },
+      }),
+  };
+}
+
+// --- Catalogue / stock screens -----------------------------------------------------
+
+export type PharmacyProduct = {
+  id: string;
+  organizationId: string;
+  catalogProductId?: string | null;
+  name: string;
+  barcode?: string | null;
+  unit: string;
+  active: boolean;
+  createdAt: string;
+};
+
+export type PharmacyProductCreateRequest = { name: string; unit: string; catalogProductId?: string; barcode?: string };
+
+export type StoreProductEnableRequest = { pharmacyProductId: string; sku: string; salePrice: string; minimumStock?: string; rack?: string };
+
+export type StockRow = { storeProductId: string; onHand: string; reserved: string; available: string; lowStock: boolean };
+export type ExpiringBatch = { batchId: string; storeProductId: string; batchNumber: string; expiryDate?: string | null; available: string; daysUntilExpiry: number; expired: boolean };
+export type ReceiveBatchRequest = { storeProductId: string; batchNumber: string; expiryDate?: string; unitCost: string; quantity: string };
+
+export type ProductsClient = {
+  listPharmacyProducts(pagination?: Pagination, options?: RequestOptions): Promise<Page<PharmacyProduct>>;
+  createPharmacyProduct(body: PharmacyProductCreateRequest, options?: RequestOptions): Promise<ApiResponse<PharmacyProduct>>;
+  /** Shelf list for the branch the token is pinned to, product names and barcodes included. */
+  listCurrentStoreProducts(options?: RequestOptions & { includeInactive?: boolean }): Promise<Page<ShelfItem>>;
+  enableStoreProduct(body: StoreProductEnableRequest, options?: RequestOptions): Promise<ApiResponse<StoreProduct>>;
+};
+
+export function createProductsClient(client: ApiClient): ProductsClient {
+  return {
+    listPharmacyProducts: (pagination = {}, options = {}) => client.list<PharmacyProduct>('/products', pagination, options),
+    createPharmacyProduct: (body, options = {}) => client.post<PharmacyProduct>('/products', body, options),
+    listCurrentStoreProducts: ({ includeInactive = false, ...options } = {}) =>
+      client.list<ShelfItem>('/products/current', {}, { ...options, query: { ...options.query, includeInactive } }),
+    enableStoreProduct: (body, options = {}) => client.post<StoreProduct>('/products/current', body, options),
+  };
+}
+
+export type InventoryClient = {
+  stock(options?: RequestOptions): Promise<ApiResponse<readonly StockRow[]>>;
+  expiring(withinDays?: number, options?: RequestOptions): Promise<ApiResponse<readonly ExpiringBatch[]>>;
+  /** Requires an idempotency key (send one via `options.idempotencyKey`). */
+  receiveBatch(body: ReceiveBatchRequest, options?: RequestOptions): Promise<ApiResponse<unknown>>;
+};
+
+export function createInventoryClient(client: ApiClient): InventoryClient {
+  return {
+    stock: (options = {}) => client.request<readonly StockRow[]>('/inventory/stock', { method: 'GET' }, { ...options, query: { ...options.query } }),
+    expiring: (withinDays = 30, options = {}) =>
+      client.get<readonly ExpiringBatch[]>('/inventory/expiring', { ...options, query: { ...options.query, withinDays } }),
+    receiveBatch: (body, options = {}) => client.post<unknown>('/inventory/batches', body, options),
+  };
+}
+
+export type PurchaseStatus = 'draft' | 'confirmed' | 'returned';
+export type PurchaseItem = { id: string; purchaseId: string; storeProductId: string; quantity: string; batchNumber: string; expiryDate?: string | null; unitCost?: string | null };
+export type Purchase = {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  supplierId: string;
+  status: PurchaseStatus;
+  invoiceNumber?: string | null;
+  note?: string | null;
+  purchasedAt: string;
+  confirmedAt?: string | null;
+  totalAmount?: string | null;
+  items: readonly PurchaseItem[];
+};
+export type PurchaseCreateRequest = {
+  supplierId: string;
+  invoiceNumber?: string;
+  note?: string;
+  purchasedAt?: string;
+  items: readonly { storeProductId: string; quantity: string; unitCost: string; batchNumber: string; expiryDate?: string }[];
+};
+
+export type PurchasesClient = {
+  list(pagination?: Pagination, options?: RequestOptions): Promise<Page<Purchase>>;
+  read(purchaseId: string, options?: RequestOptions): Promise<ApiResponse<Purchase>>;
+  create(body: PurchaseCreateRequest, options?: RequestOptions): Promise<ApiResponse<Purchase>>;
+  confirm(purchaseId: string, options?: RequestOptions): Promise<ApiResponse<Purchase>>;
+};
+
+export function createPurchasesClient(client: ApiClient): PurchasesClient {
+  return {
+    list: (pagination = {}, options = {}) => client.list<Purchase>('/purchases', pagination, options),
+    read: (purchaseId, options = {}) => client.get<Purchase>(`/purchases/${segment(purchaseId)}`, options),
+    create: (body, options = {}) => client.post<Purchase>('/purchases', body, options),
+    confirm: (purchaseId, options = {}) => client.post<Purchase>(`/purchases/${segment(purchaseId)}/confirm`, undefined, options),
+  };
+}
+
+export type Supplier = { id: string; organizationId: string; name: string; phone?: string | null; address?: string | null; status: string; createdAt: string };
+
+export type SuppliersClient = {
+  list(pagination?: Pagination, options?: RequestOptions): Promise<Page<Supplier>>;
+  create(body: { name: string; phone?: string; address?: string }, options?: RequestOptions): Promise<ApiResponse<Supplier>>;
+};
+
+export function createSuppliersClient(client: ApiClient): SuppliersClient {
+  return {
+    list: (pagination = {}, options = {}) => client.list<Supplier>('/suppliers', pagination, options),
+    create: (body, options = {}) => client.post<Supplier>('/suppliers', body, options),
   };
 }

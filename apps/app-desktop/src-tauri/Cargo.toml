@@ -13,3 +13,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# Local key-value store: a real SQLite database file, compiled into the binary so
+# the packaged till needs no system SQLite.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Legacy `store.json` migration and nothing else; the store itself is SQLite now.
+serde_json = "1"

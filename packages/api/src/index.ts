@@ -50,15 +50,27 @@ export type { CollectOptions, Page, PageFetcher } from './pagination';
 export { createMemoryStorage, storageKeys } from './storage';
 export type { StorageAdapter } from './storage';
 
+export { createDeviceIdentity } from './device';
+export type { DeviceIdentity } from './device';
+
 export { createFetchTransport } from './transport';
 export type { FetchLike, FetchTransportConfig } from './transport';
 
 export {
   createAuthClient,
+  createCustomersClient,
+  createInventoryClient,
   createOrganizationsClient,
+  createPaymentsClient,
   createPharmacyApi,
+  createProductsClient,
+  createPurchasesClient,
+  createReportsClient,
   createResourceClient,
+  createSalesClient,
   createStoresClient,
+  createSuppliersClient,
+  createSyncClient,
   createUsersClient,
 } from './resources';
 export type {
@@ -72,6 +84,7 @@ export type {
   DeviceStatus,
   LogoutResult,
   MembershipOption,
+  MembershipStore,
   OrganizationCreateRequest,
   OrganizationCreateResponse,
   OrganizationProfile,
@@ -111,4 +124,57 @@ export type {
   UserStatusUpdateRequest,
   UserUpdateRequest,
   UsersClient,
+} from './resources';
+export type {
+  Customer,
+  CustomerAddress,
+  CustomerAddressCreateRequest,
+  CustomerCreateRequest,
+  CustomerFilters,
+  CustomerHistorySummary,
+  CustomerUpdateRequest,
+  CustomersClient,
+  DailyMetric,
+  ExpiringBatch,
+  ExpiryWarning,
+  Expense,
+  ExpenseCreateRequest,
+  ExpenseFilters,
+  InventoryClient,
+  LowStockItem,
+  Payment,
+  PaymentMethod,
+  PaymentsClient,
+  PaymentStatus,
+  PharmacyProduct,
+  PharmacyProductCreateRequest,
+  ProductsClient,
+  Purchase,
+  PurchaseCreateRequest,
+  PurchaseItem,
+  PurchasesClient,
+  PurchaseStatus,
+  ReceiveBatchRequest,
+  ReportsClient,
+  Sale,
+  SaleChannel,
+  SaleCreateRequest,
+  SaleItem,
+  SaleListFilters,
+  SalePaymentInput,
+  SaleReturnRequest,
+  SalesClient,
+  SaleStatus,
+  ShelfItem,
+  StockRow,
+  StoreProduct,
+  StoreProductEnableRequest,
+  Supplier,
+  SuppliersClient,
+  SyncAck,
+  SyncClient,
+  SyncDevice,
+  SyncEnvelope,
+  SyncPullChange,
+  TodayMetrics,
 } from './resources';

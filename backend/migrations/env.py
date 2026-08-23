@@ -12,7 +12,9 @@ from app.models import Base
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
-if config.config_file_name:
+# alembic.ini carries no logging sections; fileConfig raises KeyError on those rather
+# than defaulting, so only configure logging when a formatters section is actually present.
+if config.config_file_name and config.get_section("formatters"):
     fileConfig(config.config_file_name)
 target_metadata = Base.metadata
 

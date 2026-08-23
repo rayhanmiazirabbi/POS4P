@@ -1,0 +1,32 @@
+/* Two-column operational screens (POS, catalogue, inventory, purchasing).
+   The column ratios mirror the desktop inline styles they replace; spacing
+   matches @pharmacy/design-tokens `spacing.lg` (16px) so the layout above the
+   breakpoints is unchanged. */
+.split-grid {
+  display: grid;
+  align-items: start;
+  gap: 16px;
+  padding: 16px;
+}
+
+.split-grid--counter {
+  grid-template-columns: 1.4fr 1fr;
+}
+
+.split-grid--wide {
+  grid-template-columns: 1.5fr 1fr;
+}
+
+@media (max-width: 960px) {
+  .split-grid--counter,
+  .split-grid--wide {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .split-grid {
+    gap: 12px;
+    padding: 12px;
+  }
+}

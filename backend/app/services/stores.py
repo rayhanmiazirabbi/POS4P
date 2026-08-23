@@ -20,6 +20,7 @@ from app.schemas.stores import (
     StoreStatusUpdateRequest,
     StoreUpdateRequest,
 )
+from app.security import utc_now
 from app.services.audit import record_audit, redact
 from app.services.organizations import (
     coerce_settings,
@@ -40,8 +41,13 @@ def store_settings_of(store: Store) -> StoreSettings:
 
 
 def local_now(store: Store, *, moment: datetime | None = None) -> datetime:
-    """Wall-clock time at the branch. Reports are cut on this, not on server time."""
-    return (moment or datetime.now(tz=ZoneInfo("UTC"))).astimezone(ZoneInfo(store.timezone))
+    """Wall-clock time at the branch. Reports are cut on this, not on server time.
+
+    Reads the clock through ``utc_now`` rather than ``datetime.now`` so the whole
+    codebase has one source of "now" -- day-boundary behaviour is only testable if
+    the clock can be moved, and this function decides which day a sale belongs to.
+    """
+    return (moment or utc_now()).astimezone(ZoneInfo(store.timezone))
 
 
 def business_date(store: Store, *, moment: datetime | None = None) -> date:

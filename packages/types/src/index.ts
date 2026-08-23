@@ -5,6 +5,18 @@ export type Money = { amount: string; currency: Currency };
 export type Role = 'owner' | 'manager' | 'cashier' | 'inventory_staff';
 export type EntityStatus = 'active' | 'inactive' | 'suspended';
 
+/**
+ * The tenders the platform accepts, mirroring `PaymentMethod` in
+ * `backend/app/domains/payments.py`.
+ *
+ * Here rather than in one feature package because two of them disagreed:
+ * `@pharmacy/reports` also listed `card`, which no backend enum, migration or API
+ * schema has ever accepted. A dashboard could therefore compile a card row that
+ * cannot exist, while a card payment posted through the API would be rejected --
+ * the breakdown silently defining its own idea of what a shop can take.
+ */
+export type PaymentMethod = 'cash' | 'bkash' | 'nagad' | 'due';
+
 export type Organization = {
   id: UUID; name: string; slug: string; status: EntityStatus; createdAt: ISODateTime;
 };

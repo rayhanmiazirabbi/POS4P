@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import table from '../fixtures/parity.json';
 import {
   add, allocate, change, compare, due, formatMoney, isNegative, isZero,
-  money, multiply, round, subtract, type MoneyValue, type RoundingMode,
+  money, multiply, round, subtract, tryMoney, type MoneyValue, type RoundingMode,
 } from '../src/index';
 
 describe('money', () => {
@@ -18,6 +18,27 @@ describe('money', () => {
     expect(() => money('1.001')).toThrow('Invalid decimal');
     expect(() => add(money('1.00'), { amount: '1.00', currency: 'USD' as never })).toThrow('Currency mismatch');
     expect(() => subtract(money('1.00'), { amount: '1.00', currency: 'USD' as never })).toThrow('Currency mismatch');
+  });
+
+  describe('tryMoney', () => {
+    it('accepts what money accepts', () => {
+      expect(tryMoney('250')).toEqual({ amount: '250', currency: 'BDT' });
+      expect(tryMoney('250.50')).toEqual({ amount: '250.50', currency: 'BDT' });
+      expect(tryMoney('  250.5  ')).toEqual({ amount: '250.5', currency: 'BDT' });
+      expect(tryMoney('-5.00')).toEqual({ amount: '-5.00', currency: 'BDT' });
+    });
+    it('returns null instead of coercing an unreadable field to zero', () => {
+      // Zero is the dangerous answer here, not an error: silently reading a
+      // mistyped tender as 0.00 posts the sale for money the till never took and
+      // pushes the balance onto cash or onto the customer's due account.
+      for (const bad of ['', 'abc', '1,200', '12.', '1e3', '250.505', ' ', '+5', 'NaN', 'Infinity']) {
+        expect(tryMoney(bad), bad).toBeNull();
+      }
+    });
+    it('never throws where money would', () => {
+      expect(() => money('12.')).toThrow('Invalid decimal');
+      expect(() => tryMoney('12.')).not.toThrow();
+    });
   });
 
   describe('subtract, compare, and predicates', () => {

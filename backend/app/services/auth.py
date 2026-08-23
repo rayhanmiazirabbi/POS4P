@@ -26,6 +26,7 @@ from app.models import Session as SessionModel
 from app.schemas.auth import (
     DeviceClaim,
     MembershipOption,
+    MembershipStore,
     OtpRequest,
     OtpVerifyRequest,
     PinLoginRequest,
@@ -128,14 +129,14 @@ async def _membership_rows(
         (
             membership,
             organization,
-            await _accessible_store_ids(session, organization.id, user.id, membership.role),
+            await _accessible_stores(session, organization.id, user.id, membership.role),
         )
         for membership, organization in rows
     ]
 
 
 def _to_options(
-    rows: list[tuple[OrganizationUser, Organization, list[UUID]]],
+    rows: list[tuple[OrganizationUser, Organization, list[Store]]],
 ) -> list[MembershipOption]:
     """This is the only place membership is disclosed, and only to the user it describes."""
     return [
@@ -143,9 +144,12 @@ def _to_options(
             organization_id=organization.id,
             organization_name=organization.name,
             role=membership.role,
-            store_ids=store_ids,
+            stores=[
+                MembershipStore(id=store.id, code=store.code, name=store.name)
+                for store in stores
+            ],
         )
-        for membership, organization, store_ids in rows
+        for membership, organization, stores in rows
     ]
 
 
@@ -153,17 +157,25 @@ async def _membership_options(session: AsyncSession, user: User) -> list[Members
     return _to_options(await _membership_rows(session, user))
 
 
-async def _accessible_store_ids(
+async def _accessible_stores(
     session: AsyncSession, organization_id: UUID, user_id: UUID, role: Role
-) -> list[UUID]:
-    query = select(Store.id).where(
+) -> list[Store]:
+    """The branches this membership may be scoped onto, in a stable order.
+
+    Ordered by ``code`` to match ``stores.list_stores``, which is the other endpoint
+    a branch picker can be built from -- two orderings of the same list would put
+    the same shop in different positions on the login screen and the switch-branch
+    screen. It also used to have no ordering at all, which mattered because the
+    clients were taking the first entry unattended.
+    """
+    query = select(Store).where(
         Store.organization_id == organization_id, Store.status == RecordStatus.ACTIVE
     )
     if role not in _STORE_WIDE_ROLES:
         query = query.join(StoreUser, StoreUser.store_id == Store.id).where(
             StoreUser.user_id == user_id, StoreUser.active.is_(True)
         )
-    return list(await session.scalars(query))
+    return list(await session.scalars(query.order_by(Store.code)))
 
 
 async def _resolve_store(
@@ -411,10 +423,13 @@ async def verify_otp(
     if len(rows) == 1:
         # Exactly one tenant (and one store in it) means there is nothing to choose,
         # so the session is scoped straight away and the client skips a round trip.
-        membership, organization, store_ids = rows[0]
+        # More than one store is deliberately *not* resolved here: which branch a
+        # cashier is standing in is not something the server can infer, and guessing
+        # it books sales against the wrong shelf.
+        membership, organization, stores = rows[0]
         organization_id, role = organization.id, membership.role
-        if len(store_ids) == 1:
-            store = await session.get(Store, store_ids[0])
+        if len(stores) == 1:
+            store = stores[0]
 
     device = (
         await _resolve_device(

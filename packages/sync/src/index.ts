@@ -5,7 +5,8 @@ export type OutboxStatus = 'pending' | 'uploading' | 'acknowledged' | 'failed' |
 export type OutboxEntry<T = unknown> = { envelope: SyncEnvelope<T>; status: OutboxStatus; attempts: number; nextAttemptAt: string | null; error: string | null };
 export type SyncAcknowledgement = { eventId: string; serverSequence: number; duplicate: boolean };
 export type RemoteChange<T = unknown> = { serverSequence: number; eventType: string; payload: T };
-export type PullPage<T = unknown> = { changes: readonly RemoteChange<T>[]; nextCursor: string; hasMore: boolean };
+/** One page of `GET /sync/events`. `nextCursor` is a server sequence, matching `PullResponse` in `backend/app/schemas/sync.py` -- it was typed `string` here, which no caller could have fed back to the endpoint. */
+export type PullPage<T = unknown> = { changes: readonly RemoteChange<T>[]; nextCursor: number; hasMore: boolean };
 
 export type ConnectivityState = 'online' | 'offline';
 export type DownloadCursor = { lastServerSequence: number };
@@ -29,11 +30,35 @@ export function validateEnvelope(envelope: SyncEnvelope): readonly string[] {
   return problems;
 }
 
+/**
+ * Build an envelope, defaulting the identity fields.
+ *
+ * The idempotency key defaults to the event id, which is a fresh uuidv7 per
+ * created envelope. It used to be `${deviceId}:${clientSequence}` -- a
+ * *positional* key, meaning "the Nth operation from this device", and two
+ * ordinary situations make two different sales share one position:
+ *
+ *   - One cashier on two phones. `deviceId` was derived from the signed-in user,
+ *     so both phones answered to the same id and each kept its own counter.
+ *     Both first offline sales were `mobile-abcd1234:1`.
+ *   - A reinstall, or storage cleared. The counter restarts at 1 while the server
+ *     still remembers the keys it has already seen.
+ *
+ * The failure is silent and total: `POST /sales` replays the stored response, so
+ * the second phone is told **201 Created and handed the first sale's receipt
+ * number**. Stock is never decremented, the money is never recorded, and every
+ * screen says the sale went through. The event id cannot collide this way, and
+ * the server derives its own key from it (`offline:{event_id}`) regardless.
+ *
+ * An explicit `idempotencyKey` is still honoured for callers that have a genuine
+ * business key to deduplicate on.
+ */
 export function createSyncEnvelope<T>(input: Omit<SyncEnvelope<T>, 'eventId' | 'idempotencyKey' | 'createdAt'> & Partial<Pick<SyncEnvelope<T>, 'eventId' | 'idempotencyKey' | 'createdAt'>>): SyncEnvelope<T> {
+  const eventId = input.eventId ?? createId();
   const envelope: SyncEnvelope<T> = {
     ...input,
-    eventId: input.eventId ?? createId(),
-    idempotencyKey: input.idempotencyKey ?? `${input.deviceId}:${input.clientSequence}`,
+    eventId,
+    idempotencyKey: input.idempotencyKey ?? eventId,
     createdAt: input.createdAt ?? new Date().toISOString(),
   };
   const problems = validateEnvelope(envelope);
@@ -51,8 +76,17 @@ export function addMs(isoTimestamp: string, ms: number): string {
   return new Date(Date.parse(isoTimestamp) + ms).toISOString();
 }
 
-export function retryDelayMs(attempt: number, baseMs = 1000, maxMs = 60_000): number { if (!Number.isInteger(attempt) || attempt < 0) throw new Error('Invalid retry attempt'); return Math.min(maxMs, baseMs * (2 ** attempt)); }
-
+/**
+ * Exponential backoff with optional jitter and a hard cap.
+ *
+ * `attempts` is a count, not an index: the first retry is `attempts === 1` and
+ * waits `baseMs`. A `retryDelayMs(attempt)` sat here too, computing the identical
+ * curve one step out of phase (`retryDelayMs(n) === computeBackoffMs(n + 1)`),
+ * with no caller but its own test. Two same-shaped helpers disagreeing about
+ * whether the argument counts from zero is how a retry storm gets written, and
+ * `@pharmacy/api` exports its own unrelated `retryDelayMs`, so importing both
+ * into one file collided on the name with silently different meanings.
+ */
 export function computeBackoffMs(attempts: number, backoff: RetryBackoff = defaultBackoff, random: () => number = Math.random): number {
   if (!Number.isInteger(attempts) || attempts < 1) throw new Error('Attempts must be a positive integer');
   const exponential = Math.min(backoff.maxMs, backoff.baseMs * 2 ** (attempts - 1));
@@ -174,3 +208,53 @@ export function summarize(outbox: readonly OutboxEntry[], cursor: DownloadCursor
 }
 
 export function sortRemoteChanges<T>(changes: readonly RemoteChange<T>[]): RemoteChange<T>[] { return [...changes].sort((a, b) => a.serverSequence - b.serverSequence); }
+
+export {
+  adoptOrphaned,
+  applyAcks,
+  createEventOutbox,
+  createOutboxStore,
+  describeIngestFailure,
+  emptySnapshot,
+  envelopeContextFor,
+  envelopeFactory,
+  flushOutbox,
+  isPermanentIngestCode,
+  summarizeQueue,
+  toWireEnvelope,
+  type AckOutcome,
+  type EnvelopeContext,
+  type EventOutbox,
+  type FlushOptions,
+  type FlushSummary,
+  type IngestAck,
+  type IngestBatch,
+  type OrphanedMutation,
+  type OutboxSnapshot,
+  type OutboxStorage,
+  type OutboxStore,
+  type QueueStatus,
+  type SignedInIdentity,
+  type StuckEntry,
+  type WireEnvelope,
+} from './outbox';
+
+export {
+  createShelfStore,
+  describeShelfAge,
+  loadShelf,
+  matchShelf,
+  readShelf,
+  scanShelf,
+  submitShelfEntry,
+  toShelfProduct,
+  type ShelfCache,
+  type ShelfLoad,
+  type ShelfMatch,
+  type ShelfMatchKind,
+  type ShelfProduct,
+  type ShelfRead,
+  type ShelfScan,
+  type ShelfSource,
+  type ShelfStore,
+} from './shelf';

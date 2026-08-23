@@ -76,13 +76,28 @@ class SelectContextRequest(ApiModel):
     device: DeviceClaim | None = None
 
 
+class MembershipStore(ApiModel):
+    """One branch inside a membership, named well enough to put on a button.
+
+    The ids alone were not enough. A client offered ``["a3f...", "7c1..."]`` cannot
+    ask a cashier which branch they are standing in, so all three shells silently
+    took the first entry -- and since the query behind it had no ``ORDER BY``, that
+    entry was whichever row the database happened to return. Sales then booked
+    against a branch nobody chose, drawing down its stock.
+    """
+
+    id: UUID
+    code: str
+    name: str
+
+
 class MembershipOption(ApiModel):
     """One tenant the authenticated user may select after OTP verification."""
 
     organization_id: UUID
     organization_name: str
     role: Role
-    store_ids: list[UUID]
+    stores: list[MembershipStore]
 
 
 class SessionResponse(ApiModel):

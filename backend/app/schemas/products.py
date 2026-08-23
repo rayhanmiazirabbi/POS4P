@@ -104,6 +104,24 @@ class StoreProductResponse(ApiModel):
     created_at: datetime
 
 
+class ShelfItemResponse(StoreProductResponse):
+    """A shelf row with the two fields a counter cannot sell without.
+
+    ``name`` and ``barcode`` live on ``PharmacyProduct``, one join away, and the
+    shelf endpoint did not make it -- so every counter listed bare SKUs
+    (``PARA-500``, not ``Paracetamol 500mg``) and a scanned barcode had nothing on
+    the device to match against. The second half is the one that mattered: the whole
+    point of caching the shelf is selling through an outage, and a scanner that has
+    to ask the server which product it just read cannot do that.
+
+    A superset of ``StoreProductResponse`` rather than a replacement, so the
+    management screens reading the same endpoint are unaffected.
+    """
+
+    name: str
+    barcode: str | None
+
+
 class StoreProductPriceResponse(ApiModel):
     id: UUID
     store_product_id: UUID

@@ -170,7 +170,7 @@ async def list_sessions(
     session: SessionDep,
     context: ContextDep,
     request_id: RequestIdDep,
-    user_id: Annotated[UUID | None, Query()] = None,
+    user_id: Annotated[UUID | None, Query(alias="userId")] = None,
 ) -> Envelope[list[SessionResponse]]:
     rows = await service.list_sessions(session, context, user_id=user_id)
     return Envelope(

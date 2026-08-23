@@ -147,6 +147,70 @@ async def test_otp_verification_auto_selects_a_single_membership(
     assert len(body["organizations"]) == 1
 
 
+async def test_multi_branch_login_leaves_the_branch_unchosen_and_names_the_options(
+    client: AsyncClient,
+    session: AsyncSession,
+    tenant: dict[str, Any],
+    make_store: Any,
+) -> None:
+    """A second branch means the server stops and hands back a labelled list.
+
+    Two things are pinned. First that ``storeId`` stays null: the server cannot know
+    which counter the cashier is standing at, and picking one books sales against
+    the wrong shelf and draws down its stock. Second that each option carries a code
+    and a name, because the clients used to receive bare ids, and a screen that
+    cannot label a branch cannot ask about it -- all three shells took entry zero
+    unattended.
+    """
+    await make_store(tenant["organization"], name="Uttara Branch", code="AAA-UTT")
+    await session.commit()
+
+    challenge_id, code = await _issue_code(client, OWNER_PHONE)
+    response = await client.post(
+        "/auth/otp/verify", json={"challengeId": challenge_id, "code": code}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["organizationId"] == str(tenant["organization"].id)
+    assert body["storeId"] is None
+
+    stores = body["organizations"][0]["stores"]
+    assert [store["name"] for store in stores] == ["Uttara Branch", "Main Branch"]
+    # Ordered by code, matching `GET /stores`. Two orderings of one list would put
+    # the same shop in different places on the login and switch-branch screens.
+    assert [store["code"] for store in stores] == ["AAA-UTT", "MAIN"]
+    assert all(store["id"] and store["name"] for store in stores)
+
+
+async def test_multi_branch_login_can_then_select_a_named_branch(
+    client: AsyncClient,
+    session: AsyncSession,
+    tenant: dict[str, Any],
+    make_store: Any,
+) -> None:
+    """The second half of the picker: the id offered above is one the server accepts."""
+    await make_store(tenant["organization"], name="Uttara Branch", code="AAA-UTT")
+    await session.commit()
+
+    challenge_id, code = await _issue_code(client, OWNER_PHONE)
+    verified = (
+        await client.post("/auth/otp/verify", json={"challengeId": challenge_id, "code": code})
+    ).json()["data"]
+    chosen = next(
+        store
+        for store in verified["organizations"][0]["stores"]
+        if store["name"] == "Uttara Branch"
+    )
+
+    selected = await client.post(
+        "/auth/context",
+        json={"organizationId": verified["organizationId"], "storeId": chosen["id"]},
+        headers=_bearer(verified["accessToken"]),
+    )
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["data"]["storeId"] == chosen["id"]
+
+
 async def test_replayed_otp_is_rejected(client: AsyncClient, tenant: dict[str, Any]) -> None:
     """A consumed challenge must not mint a second session even with the right code."""
     challenge_id, code = await _issue_code(client, OWNER_PHONE)

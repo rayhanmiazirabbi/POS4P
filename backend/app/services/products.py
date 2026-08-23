@@ -253,6 +253,37 @@ async def list_store_products(
     return list(await session.scalars(query.order_by(StoreProduct.sku)))
 
 
+async def list_shelf(
+    session: AsyncSession,
+    context: RequestContext,
+    store: Store,
+    *,
+    include_inactive: bool = False,
+) -> list[tuple[StoreProduct, PharmacyProduct]]:
+    """The shelf, each row paired with the product it sells.
+
+    One query with a join rather than ``list_store_products`` plus a lookup per
+    row: the shelf is the list a counter loads on every start, and a shop with two
+    thousand SKUs would otherwise open with two thousand round trips to the
+    database.
+
+    An inactive *pharmacy* product is excluded even when ``include_inactive`` asks
+    for inactive shelf rows. The two flags mean different things -- the shelf row
+    says "this branch stocks it", the product says "we sell this at all" -- and a
+    product withdrawn organization-wide is not sellable at any branch that happens
+    to have left its row switched on.
+    """
+    query = (
+        select(StoreProduct, PharmacyProduct)
+        .join(PharmacyProduct, PharmacyProduct.id == StoreProduct.pharmacy_product_id)
+        .where(StoreProduct.store_id == store.id, PharmacyProduct.active.is_(True))
+    )
+    if not include_inactive:
+        query = query.where(StoreProduct.active.is_(True))
+    rows = await session.execute(query.order_by(StoreProduct.sku))
+    return [(shelf_row, product) for shelf_row, product in rows.all()]
+
+
 async def enable_store_product(
     session: AsyncSession,
     context: RequestContext,

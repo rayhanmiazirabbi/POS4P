@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  ApiClient, CursorStore, createAuthClient, createMemoryStorage, createPharmacyApi,
+  ApiClient, CursorStore, createAuthClient, createDeviceIdentity, createMemoryStorage, createPharmacyApi,
   isApiRequestError, storageKeys, type ApiTransport, type StorageAdapter,
 } from '../src/index';
 
@@ -164,5 +164,57 @@ describe('auth client', () => {
     const auth = createAuthClient(new ApiClient(transport, storage));
     await auth.logout();
     expect(calls[0]?.path).toBe('/auth/logout');
+  });
+});
+
+describe('createDeviceIdentity', () => {
+  it('generates one key per install and reuses it', async () => {
+    const storage = createMemoryStorage();
+    const identity = createDeviceIdentity(storage);
+    expect(await identity.peek()).toBeNull();
+    const first = await identity.claim('Counter tablet');
+    const second = await identity.claim('Counter tablet');
+    expect(first.deviceKey).toBe(second.deviceKey);
+    expect(await storage.get(storageKeys.deviceKey)).toBe(first.deviceKey);
+  });
+
+  it('generates a key the backend will accept', async () => {
+    // `DeviceKey` is `min_length=8, max_length=160` in backend/app/schemas/auth.py.
+    const { deviceKey } = await createDeviceIdentity(createMemoryStorage()).claim('Till');
+    expect(deviceKey.length).toBeGreaterThanOrEqual(8);
+    expect(deviceKey.length).toBeLessThanOrEqual(160);
+  });
+
+  it('gives two installs different keys', async () => {
+    // The whole point: two phones must not answer to one device identity, or they
+    // share a client-sequence stream and silently dedupe each other's sales.
+    const a = await createDeviceIdentity(createMemoryStorage()).claim('Phone A');
+    const b = await createDeviceIdentity(createMemoryStorage()).claim('Phone B');
+    expect(a.deviceKey).not.toBe(b.deviceKey);
+  });
+
+  it('does not generate two keys for concurrent logins', async () => {
+    // A retry racing the first attempt would otherwise orphan one device row and
+    // restart the sequence stream on the survivor.
+    const identity = createDeviceIdentity(createMemoryStorage());
+    const [first, second] = await Promise.all([identity.claim('Till'), identity.claim('Till')]);
+    expect(first?.deviceKey).toBe(second?.deviceKey);
+  });
+
+  it('survives sign-out, because the device is not the session', async () => {
+    // Clearing this on logout registers a fresh device row every shift change.
+    const storage = createMemoryStorage();
+    const identity = createDeviceIdentity(storage);
+    const before = await identity.claim('Till');
+    await storage.remove(storageKeys.accessToken);
+    await storage.remove(storageKeys.refreshToken);
+    expect((await identity.claim('Till')).deviceKey).toBe(before.deviceKey);
+  });
+
+  it('treats a blank stored key as absent', async () => {
+    const storage = createMemoryStorage({ [storageKeys.deviceKey]: '   ' });
+    const { deviceKey } = await createDeviceIdentity(storage).claim('Till');
+    expect(deviceKey.trim()).not.toBe('');
+    expect(deviceKey.length).toBeGreaterThanOrEqual(8);
   });
 });

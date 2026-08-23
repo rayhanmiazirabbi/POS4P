@@ -50,6 +50,27 @@ export function money(amount: string, currency: 'BDT' = 'BDT'): MoneyValue {
   return { amount, currency };
 }
 
+/**
+ * Parse an amount that came from a human, yielding `null` instead of throwing
+ * when it is not one.
+ *
+ * `money` throwing is right for values the program computed, and wrong for a text
+ * field read on every keystroke: a half-typed "12." would take the render down
+ * with it. The tempting shortcut is to coerce whatever will not parse to zero,
+ * and that is worse than either -- a mistyped tender then vanishes silently and
+ * the sale posts for money the till never took. `null` forces the caller to
+ * decide, which is the point.
+ */
+export function tryMoney(amount: string, currency: 'BDT' = 'BDT'): MoneyValue | null {
+  const trimmed = amount.trim();
+  try {
+    parse(trimmed);
+  } catch {
+    return null;
+  }
+  return { amount: trimmed, currency };
+}
+
 export function round(value: string, mode: RoundingMode): MoneyValue {
   return money(format(toCents(parseScaled(value), mode)));
 }

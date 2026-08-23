@@ -14,7 +14,6 @@ import {
   recoverAfterRestart,
   rejectEvent,
   releaseUpload,
-  retryDelayMs,
   scheduleRetry,
   sortRemoteChanges,
   summarize,
@@ -50,7 +49,6 @@ describe('sync', () => {
     const failed = markFailed(enqueue([], base), 'e1', 'stock conflict', '2026-08-21T00:01:00Z');
     expect(failed[0]).toMatchObject({ status: 'failed', attempts: 1, error: 'stock conflict' });
     expect(sortRemoteChanges([{ serverSequence: 2, eventType: 'b', payload: {} }, { serverSequence: 1, eventType: 'a', payload: {} }]).map((change) => change.serverSequence)).toEqual([1, 2]);
-    expect(retryDelayMs(10)).toBe(60000);
   });
 
   it('validates envelopes against the offline mutation contract', () => {
@@ -65,8 +63,30 @@ describe('sync', () => {
   it('creates envelopes with deterministic defaults and rejects invalid ones', () => {
     const envelope = createSyncEnvelope({ deviceId: 'd9', organizationId: 'o9', storeId: 's9', userId: 'u9', eventType: 'sale.create', clientSequence: 3, payload: {} });
     expect(envelope.eventId).toBeTruthy();
-    expect(envelope.idempotencyKey).toBe('d9:3');
+    expect(envelope.idempotencyKey).toBe(envelope.eventId);
     expect(() => createSyncEnvelope({ ...envelope, clientSequence: 0 })).toThrow(/clientSequence/);
+  });
+
+  it('never derives the idempotency key from the queue position', () => {
+    // The default was `${deviceId}:${clientSequence}`, which names a *slot*
+    // rather than an operation. Two ordinary situations put two different sales
+    // in one slot -- one cashier on two phones (the device id was derived from
+    // the user, so both phones shared it and each kept its own counter), and a
+    // reinstall that restarts the counter while the server still remembers the
+    // keys it has seen. `POST /sales` then replays the stored response, so the
+    // second sale is answered 201 Created with the first sale's receipt number:
+    // no stock moved, no money recorded, and every screen says it worked.
+    const context = { deviceId: 'shared-device', organizationId: 'o1', storeId: 's1', userId: 'u1', eventType: 'sale.create' } as const;
+    const first = createSyncEnvelope({ ...context, clientSequence: 1, payload: { cart: 'paracetamol' } });
+    const afterReinstall = createSyncEnvelope({ ...context, clientSequence: 1, payload: { cart: 'omeprazole' } });
+    expect(afterReinstall.idempotencyKey).not.toBe(first.idempotencyKey);
+    // ...and the local queue must keep both, since its dedupe uses the same key.
+    expect(enqueue(enqueue([], first), afterReinstall)).toHaveLength(2);
+  });
+
+  it('still honours an explicit idempotency key', () => {
+    const envelope = createSyncEnvelope({ deviceId: 'd1', organizationId: 'o1', storeId: 's1', userId: 'u1', eventType: 'sale.create', clientSequence: 1, idempotencyKey: 'business-key-7', payload: {} });
+    expect(envelope.idempotencyKey).toBe('business-key-7');
   });
 
   it('crash during enqueue replays safely: the same event is never queued twice', () => {
@@ -167,7 +187,6 @@ describe('sync', () => {
     expect(computeBackoffMs(1, { baseMs: 250, maxMs: 4000, jitterRatio: 0.5 }, () => 0.5)).toBe(250);
     expect(computeBackoffMs(20, { baseMs: 1000, maxMs: 60000, jitterRatio: 1 }, () => 1)).toBeLessThanOrEqual(60000);
     expect(() => computeBackoffMs(0)).toThrow('Attempts must be a positive integer');
-    expect(() => retryDelayMs(-1)).toThrow('Invalid retry attempt');
   });
 
   it('summarizes sync state including connectivity and the earliest retry', () => {
