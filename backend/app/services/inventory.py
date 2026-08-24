@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.context import RequestContext
@@ -17,6 +17,7 @@ from app.domains.inventory import (
     InventoryBatch,
     InventoryMovement,
     InventoryMovementType,
+    StockReservation,
     StockTransfer,
     StockTransferItem,
     TransferStatus,
@@ -123,6 +124,13 @@ async def _apply_to_balance(
 async def _batch_available_map(
     session: AsyncSession, store_product: StoreProduct
 ) -> dict[UUID, Decimal]:
+    """Per-batch sellable quantity: ledger movements less active reservations.
+
+    Reservations never write movements -- they only hold availability back --
+    so an allocation that ignored them would hand the same batch units to a
+    second order and drive ``available`` below zero once both hold. Expired
+    holds no longer hold anything.
+    """
     rows = await session.execute(
         select(InventoryMovement.batch_id, func.sum(InventoryMovement.quantity))
         .where(
@@ -131,7 +139,69 @@ async def _batch_available_map(
         )
         .group_by(InventoryMovement.batch_id)
     )
-    return {batch_id: Decimal(total or 0) for batch_id, total in rows.all()}
+    available = {batch_id: Decimal(total or 0) for batch_id, total in rows.all()}
+    now = utc_now()
+    holds = await session.execute(
+        select(StockReservation.batch_id, func.sum(StockReservation.quantity))
+        .where(
+            StockReservation.store_product_id == store_product.id,
+            StockReservation.released_at.is_(None),
+            or_(StockReservation.expires_at.is_(None), StockReservation.expires_at > now),
+        )
+        .group_by(StockReservation.batch_id)
+    )
+    for batch_id, held in holds.all():
+        available[batch_id] = available.get(batch_id, Decimal(0)) - Decimal(held or 0)
+    return available
+
+
+async def release_expired_reservations(
+    session: AsyncSession, *, organization_id: UUID, store_id: UUID
+) -> int:
+    """Release every expired hold in a branch and correct the reserved projection.
+
+    A reservation never moved stock, so release is purely projection work: mark
+    the row released and give the held quantity back to ``available`` by lowering
+    ``reserved``. Rows are selected ``FOR UPDATE``, so two concurrent sweeps
+    cannot both claim the same expired hold -- the loser waits, re-checks
+    ``released_at IS NULL``, and skips what the winner already freed. Returns the
+    number of reservations released.
+    """
+    now = utc_now()
+    rows = (
+        await session.execute(
+            select(StockReservation)
+            .where(
+                StockReservation.organization_id == organization_id,
+                StockReservation.store_id == store_id,
+                StockReservation.released_at.is_(None),
+                StockReservation.expires_at.is_not(None),
+                StockReservation.expires_at <= now,
+            )
+            .with_for_update()
+        )
+    ).scalars().all()
+    if not rows:
+        return 0
+
+    released: dict[UUID, Decimal] = {}
+    for reservation in rows:
+        reservation.released_at = now
+        released[reservation.store_product_id] = (
+            released.get(reservation.store_product_id, Decimal(0)) + Decimal(reservation.quantity)
+        )
+    for store_product_id, quantity in released.items():
+        balance = await session.scalar(
+            select(InventoryBalance)
+            .where(
+                InventoryBalance.store_id == store_id,
+                InventoryBalance.store_product_id == store_product_id,
+            )
+            .with_for_update()
+        )
+        if balance is not None:
+            balance.reserved = Decimal(balance.reserved) - quantity
+    return len(rows)
 
 
 # --- receiving --------------------------------------------------------------

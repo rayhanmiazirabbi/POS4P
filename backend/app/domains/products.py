@@ -37,7 +37,10 @@ class StoreProduct(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "store_products"
     __table_args__ = (
         UniqueConstraint("store_id", "pharmacy_product_id"),
-        UniqueConstraint("store_id", "sku"),
+        # Explicit name: the convention derives from column_0_name, so this
+        # would collide with the constraint above and PostgreSQL rejects a
+        # table carrying two same-named constraints.
+        UniqueConstraint("store_id", "sku", name="uq_store_products_sku"),
         Index("ix_store_products_scope", "organization_id", "store_id"),
     )
 

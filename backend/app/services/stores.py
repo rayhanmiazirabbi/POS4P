@@ -74,8 +74,13 @@ async def _assert_store_membership(
 
     Owners and managers reach every branch through their organization membership;
     everyone else needs an explicit active ``store_users`` row, so a token that
-    names a branch the user was removed from stops working immediately.
+    names a branch the user was removed from stops working immediately. An
+    anonymous context (no user, no role -- guest storefront flows only) carries
+    no member to assert; its tenant scope was fixed by resolving the storefront
+    from slugs, and the caller's own organization check still applies below.
     """
+    if context.user_id is None and context.role is None:
+        return
     if context.role in ORGANIZATION_WIDE_ROLES:
         return
     assignment = await session.scalar(

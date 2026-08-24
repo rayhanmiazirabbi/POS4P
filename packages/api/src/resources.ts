@@ -341,6 +341,10 @@ export type PharmacyApi = {
   customers: CustomersClient;
   reports: ReportsClient;
   sync: SyncClient;
+  orders: OrdersClient;
+  ecommerce: EcommerceClient;
+  storefront: StorefrontClient;
+  prescriptions: PrescriptionsClient;
 };
 
 export function createPharmacyApi(client: ApiClient): PharmacyApi {
@@ -359,6 +363,10 @@ export function createPharmacyApi(client: ApiClient): PharmacyApi {
     customers: createCustomersClient(client),
     reports: createReportsClient(client),
     sync: createSyncClient(client),
+    orders: createOrdersClient(client),
+    ecommerce: createEcommerceClient(client),
+    storefront: createStorefrontClient(client),
+    prescriptions: createPrescriptionsClient(client),
   };
 }
 
@@ -812,5 +820,274 @@ export function createSuppliersClient(client: ApiClient): SuppliersClient {
   return {
     list: (pagination = {}, options = {}) => client.list<Supplier>('/suppliers', pagination, options),
     create: (body, options = {}) => client.post<Supplier>('/suppliers', body, options),
+  };
+}
+
+// --- Commerce phase: online orders, listings, prescriptions, public storefront ----
+
+/** Mirrors `OrderStatus` in `backend/app/domains/orders.py` (values on the wire). */
+export type OnlineOrderStatus =
+  | 'pending'
+  | 'reserved'
+  | 'accepted'
+  | 'preparing'
+  | 'ready'
+  | 'completed'
+  | 'cancelled';
+
+export type OnlineFulfillment = 'pickup' | 'delivery';
+
+export type OrderItemLine = {
+  id: string;
+  storeProductId: string;
+  productName: string;
+  quantity: string;
+  unitPrice: string;
+  lineTotal: string;
+};
+
+export type OrderStatusHistoryEntry = {
+  id: string;
+  fromStatus: OnlineOrderStatus | null;
+  toStatus: OnlineOrderStatus;
+  actorUserId?: string | null;
+  createdAt: string;
+};
+
+/** Mirrors `OrderResponse`. */
+export type OnlineOrder = {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  customerId?: string | null;
+  status: OnlineOrderStatus;
+  subtotal: string;
+  total: string;
+  prescriptionRequired: boolean;
+  deliveryAddress?: Record<string, unknown> | null;
+  createdAt: string;
+  items: readonly OrderItemLine[];
+  history: readonly OrderStatusHistoryEntry[];
+};
+
+export type OrderCheckoutItem = { storeProductId: string; quantity: string };
+
+export type OrderCreateRequest = {
+  items: readonly OrderCheckoutItem[];
+  customerId?: string;
+  fulfillment?: OnlineFulfillment;
+  deliveryAddress?: Record<string, unknown>;
+};
+
+export type OrderTransitionRequest = { status: OnlineOrderStatus };
+export type OrderListFilters = { status?: OnlineOrderStatus; customerId?: string };
+
+/**
+ * Typed client for `/orders` (`backend/app/routers/orders.py`).
+ *
+ * Staff-authenticated: creating and moving orders is counter work. Guest
+ * traffic goes through `StorefrontClient` instead.
+ */
+export type OrdersClient = {
+  list(filters?: OrderListFilters, options?: RequestOptions): Promise<ApiResponse<readonly OnlineOrder[]>>;
+  read(orderId: string, options?: RequestOptions): Promise<ApiResponse<OnlineOrder>>;
+  /** Requires an idempotency key (send one via `options.idempotencyKey`). */
+  create(body: OrderCreateRequest, options?: RequestOptions): Promise<ApiResponse<OnlineOrder>>;
+  transition(orderId: string, body: OrderTransitionRequest, options?: RequestOptions): Promise<ApiResponse<OnlineOrder>>;
+};
+
+export function createOrdersClient(client: ApiClient): OrdersClient {
+  return {
+    list: (filters = {}, options = {}) =>
+      client.request<readonly OnlineOrder[]>('/orders', { method: 'GET' }, {
+        ...options,
+        query: { ...options.query, status: filters.status, customerId: filters.customerId },
+      }),
+    read: (orderId, options = {}) => client.get<OnlineOrder>(`/orders/${segment(orderId)}`, options),
+    create: (body, options = {}) => client.post<OnlineOrder>('/orders', body, options),
+    transition: (orderId, body, options = {}) =>
+      client.post<OnlineOrder>(`/orders/${segment(orderId)}/transition`, body, options),
+  };
+}
+
+/** Mirrors `StorefrontResponse`. */
+export type Storefront = {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  slug: string;
+  displayName: string;
+  enabled: boolean;
+  customDomain?: string | null;
+  createdAt: string;
+};
+
+export type StorefrontUpsertRequest = {
+  slug: string;
+  displayName: string;
+  enabled?: boolean;
+  customDomain?: string;
+};
+
+/** Mirrors `ListingResponse`: the per-branch online overlay of a store product. */
+export type EcommerceListing = {
+  id: string;
+  storeId: string;
+  storeProductId: string;
+  onlineName?: string | null;
+  description?: string | null;
+  onlinePrice?: string | null;
+  listed: boolean;
+  pickupEnabled: boolean;
+  deliveryEnabled: boolean;
+};
+
+export type ListingUpsertRequest = {
+  onlineName?: string;
+  description?: string;
+  onlinePrice?: string;
+  listed?: boolean;
+  pickupEnabled?: boolean;
+  deliveryEnabled?: boolean;
+};
+
+/** Typed client for `/ecommerce` (`backend/app/routers/ecommerce.py`). */
+export type EcommerceClient = {
+  listStorefronts(options?: RequestOptions): Promise<ApiResponse<readonly Storefront[]>>;
+  upsertStorefront(body: StorefrontUpsertRequest, options?: RequestOptions): Promise<ApiResponse<Storefront>>;
+  upsertListing(storeProductId: string, body: ListingUpsertRequest, options?: RequestOptions): Promise<ApiResponse<EcommerceListing>>;
+  listListings(listed?: boolean, options?: RequestOptions): Promise<ApiResponse<readonly EcommerceListing[]>>;
+  catalogue(slug: string, options?: RequestOptions): Promise<ApiResponse<readonly PublicCatalogueItem[]>>;
+};
+
+export function createEcommerceClient(client: ApiClient): EcommerceClient {
+  return {
+    listStorefronts: (options = {}) => client.get<readonly Storefront[]>('/ecommerce/storefronts', options),
+    upsertStorefront: (body, options = {}) => client.post<Storefront>('/ecommerce/storefronts', body, options),
+    upsertListing: (storeProductId, body, options = {}) =>
+      client.put<EcommerceListing>(`/ecommerce/products/${segment(storeProductId)}/listing`, body, options),
+    listListings: (listed, options = {}) =>
+      client.get<readonly EcommerceListing[]>('/ecommerce/listings', { ...options, query: { ...options.query, listed } }),
+    catalogue: (slug, options = {}) =>
+      client.get<readonly PublicCatalogueItem[]>(`/ecommerce/storefronts/${segment(slug)}/catalogue`, options),
+  };
+}
+
+/** Mirrors `PublicCatalogueItem`: one row of an anonymous storefront listing. */
+export type PublicCatalogueItem = {
+  storeProductId: string;
+  name: string;
+  price: string;
+  pickupEnabled: boolean;
+  deliveryEnabled: boolean;
+  prescriptionRequired: boolean;
+};
+
+export type GuestCheckoutResult = OnlineOrder;
+
+const ANONYMOUS_REQUEST: RequestOptions = { anonymous: true };
+
+/**
+ * Anonymous storefront surface (`backend/app/routers/storefront.py`).
+ *
+ * The organization slug plus storefront slug is the whole tenant address, so a
+ * guest checkout can never be aimed at the wrong branch by stale local state.
+ */
+export type StorefrontClient = {
+  catalogue(organizationSlug: string, slug: string, options?: RequestOptions): Promise<ApiResponse<readonly PublicCatalogueItem[]>>;
+  /** Requires an idempotency key (send one via `options.idempotencyKey`). */
+  checkout(
+    organizationSlug: string,
+    slug: string,
+    body: OrderCreateRequest,
+    options?: RequestOptions,
+  ): Promise<ApiResponse<GuestCheckoutResult>>;
+};
+
+export function createStorefrontClient(client: ApiClient): StorefrontClient {
+  return {
+    catalogue: (organizationSlug, slug, options = {}) =>
+      client.get<readonly PublicCatalogueItem[]>(
+        `/storefronts/${segment(organizationSlug)}/${segment(slug)}/catalogue`,
+        { ...ANONYMOUS_REQUEST, ...options },
+      ),
+    checkout: (organizationSlug, slug, body, options = {}) =>
+      client.post<GuestCheckoutResult>(
+        `/storefronts/${segment(organizationSlug)}/${segment(slug)}/orders`,
+        body,
+        { ...ANONYMOUS_REQUEST, ...options },
+      ),
+  };
+}
+
+export type PrescriptionStatusWire = 'pending' | 'approved' | 'rejected' | 'needs_clarification';
+
+export type PrescriptionFileMeta = {
+  id: string;
+  objectKey: string;
+  contentType: string;
+  checksum: string;
+  uploadedAt: string;
+};
+
+export type PrescriptionReviewEntry = {
+  id: string;
+  prescriptionId: string;
+  status: PrescriptionStatusWire;
+  pharmacistUserId: string;
+  notes?: string | null;
+  reviewedAt: string;
+};
+
+/** Mirrors `PrescriptionResponse`; files ride along with each prescription. */
+export type Prescription = {
+  id: string;
+  organizationId: string;
+  customerId?: string | null;
+  orderId?: string | null;
+  status: PrescriptionStatusWire;
+  prescriberName?: string | null;
+  prescriptionNumber?: string | null;
+  expiresAt?: string | null;
+  createdAt: string;
+  files: readonly PrescriptionFileMeta[];
+};
+
+export type PrescriptionCreateRequest = {
+  customerId?: string;
+  orderId?: string;
+  prescriberName?: string;
+  prescriptionNumber?: string;
+  expiresAt?: string;
+};
+
+export type PrescriptionFileRequest = { objectKey: string; contentType: string; checksum: string };
+export type PrescriptionReviewRequest = { status: PrescriptionStatusWire; notes?: string };
+export type PrescriptionAttachRequest = { orderId: string };
+export type PrescriptionListFilters = { status?: PrescriptionStatusWire; customerId?: string; orderId?: string };
+
+/** Typed client for `/prescriptions` (`backend/app/routers/prescriptions.py`). */
+export type PrescriptionsClient = {
+  list(filters?: PrescriptionListFilters, options?: RequestOptions): Promise<ApiResponse<readonly Prescription[]>>;
+  create(body: PrescriptionCreateRequest, options?: RequestOptions): Promise<ApiResponse<Prescription>>;
+  addFile(prescriptionId: string, body: PrescriptionFileRequest, options?: RequestOptions): Promise<ApiResponse<Prescription>>;
+  review(prescriptionId: string, body: PrescriptionReviewRequest, options?: RequestOptions): Promise<ApiResponse<PrescriptionReviewEntry>>;
+  attachToOrder(prescriptionId: string, body: PrescriptionAttachRequest, options?: RequestOptions): Promise<ApiResponse<Prescription>>;
+};
+
+export function createPrescriptionsClient(client: ApiClient): PrescriptionsClient {
+  return {
+    list: (filters = {}, options = {}) =>
+      client.get<readonly Prescription[]>('/prescriptions', {
+        ...options,
+        query: { ...options.query, status: filters.status, customerId: filters.customerId, orderId: filters.orderId },
+      }),
+    create: (body, options = {}) => client.post<Prescription>('/prescriptions', body, options),
+    addFile: (prescriptionId, body, options = {}) =>
+      client.post<Prescription>(`/prescriptions/${segment(prescriptionId)}/files`, body, options),
+    review: (prescriptionId, body, options = {}) =>
+      client.post<PrescriptionReviewEntry>(`/prescriptions/${segment(prescriptionId)}/review`, body, options),
+    attachToOrder: (prescriptionId, body, options = {}) =>
+      client.post<Prescription>(`/prescriptions/${segment(prescriptionId)}/order`, body, options),
   };
 }

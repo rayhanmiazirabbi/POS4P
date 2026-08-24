@@ -10,9 +10,16 @@ from app.models import Role
 
 @dataclass(frozen=True)
 class RequestContext:
+    """Who is acting.
+
+    ``user_id``/``role`` are None only for anonymous storefront flows, where the
+    "actor" is a guest checkout; every authenticated path fills both from the
+    verified token. Columns fed from these fields are nullable.
+    """
+
     organization_id: UUID
-    user_id: UUID
-    role: Role
+    user_id: UUID | None
+    role: Role | None
     store_id: UUID | None = None
     device_id: UUID | None = None
     #: The session the access token was minted from. Needed so logout can revoke

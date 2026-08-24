@@ -1,6 +1,10 @@
 """Route modules. Each feature owns exactly one file here and is mounted in ``app.main``."""
 
 from app.routers.auth import router as auth_router
+from app.routers.prescriptions import router as prescriptions_router
+from app.routers.orders import router as orders_router
+from app.routers.ecommerce import router as ecommerce_router
+from app.routers.storefront import router as storefront_router
 from app.routers.catalog import router as catalog_router
 from app.routers.customers import router as customers_router
 from app.routers.inventory import router as inventory_router
@@ -18,6 +22,10 @@ from app.routers.users import router as users_router
 
 __all__ = [
     "auth_router",
+    "prescriptions_router",
+    "orders_router",
+    "ecommerce_router",
+    "storefront_router",
     "catalog_router",
     "customers_router",
     "inventory_router",

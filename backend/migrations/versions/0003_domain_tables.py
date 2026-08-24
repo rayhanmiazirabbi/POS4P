@@ -505,7 +505,7 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['store_id'], ['stores.id'], name=op.f('fk_store_products_store_id_stores')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_store_products')),
     sa.UniqueConstraint('store_id', 'pharmacy_product_id', name=op.f('uq_store_products_store_id')),
-    sa.UniqueConstraint('store_id', 'sku', name=op.f('uq_store_products_store_id'))
+    sa.UniqueConstraint('store_id', 'sku', name='uq_store_products_sku')
     )
     op.create_index('ix_store_products_scope', 'store_products', ['organization_id', 'store_id'], unique=False)
     op.create_table('supplier_products',

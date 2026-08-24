@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, OrganizationScopedMixin, StoreScopedMixin, UUIDPrimaryKeyMixin
@@ -31,6 +31,7 @@ class Prescription(OrganizationScopedMixin, UUIDPrimaryKeyMixin, Base):
 
 class PrescriptionFile(OrganizationScopedMixin, UUIDPrimaryKeyMixin, Base):
     __tablename__ = "prescription_files"
+    __table_args__ = (UniqueConstraint("prescription_id", "object_key"),)
 
     prescription_id: Mapped[UUID] = mapped_column(ForeignKey("prescriptions.id"), nullable=False)
     object_key: Mapped[str] = mapped_column(String(500), nullable=False)
