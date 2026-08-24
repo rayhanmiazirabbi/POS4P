@@ -13,7 +13,7 @@ from app.context import RequestContext
 from app.domains.customers import Customer, CustomerAddress
 from app.domains.payments import Payment, PaymentMethod, PaymentRefund, PaymentStatus
 from app.domains.sales import Sale, SaleReturn, SaleStatus
-from app.errors import Conflict, NotFound, ValidationError
+from app.errors import Conflict, Forbidden, NotFound, ValidationError
 from app.models import Role
 from app.schemas.customers import (
     CustomerAddressCreate,
@@ -416,3 +416,41 @@ async def list_addresses(
             .order_by(CustomerAddress.created_at.desc(), CustomerAddress.id)
         )
     )
+
+
+async def list_purchase_history(
+    session: AsyncSession,
+    context: RequestContext,
+    customer_id: UUID,
+    *,
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[list[Sale], int]:
+    """Every completed sale the customer has made across all branches.
+
+    This is the stage-2 cross-store profile: the till summary answers one branch's
+    question, while retention work and loyalty disputes need the tenant-wide
+    ledger. Owner/manager only at the router -- a cashier has no business paging a
+    customer's full buying history.
+    """
+    if context.role not in SPEND_VISIBLE_ROLES:
+        raise Forbidden("Purchase history requires owner or manager")
+    await load_customer(session, context, customer_id)
+    scope = (
+        Sale.organization_id == context.organization_id,
+        Sale.customer_id == customer_id,
+        Sale.status == SaleStatus.COMPLETED,
+    )
+    total = int(
+        await session.scalar(select(func.count()).select_from(Sale).where(*scope)) or 0
+    )
+    rows = list(
+        await session.scalars(
+            select(Sale)
+            .where(*scope)
+            .order_by(Sale.created_at.desc(), Sale.id)
+            .limit(limit)
+            .offset(offset)
+        )
+    )
+    return rows, total

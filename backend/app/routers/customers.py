@@ -19,6 +19,7 @@ from app.schemas.customers import (
     CustomerAddressResponse,
     CustomerCreate,
     CustomerHistorySummary,
+    CustomerPurchaseRow,
     CustomerResponse,
     CustomerUpdate,
 )
@@ -174,3 +175,34 @@ async def list_addresses(
     addresses = await service.list_addresses(session, context, customer_id)
     items = [CustomerAddressResponse.model_validate(address) for address in addresses]
     return Envelope(data=items, request_id=request_id)
+
+
+@router.get(
+    "/{customer_id}/purchases",
+    response_model=Envelope[Page[CustomerPurchaseRow]],
+    summary="Cross-store purchase history (owner/manager only)",
+)
+async def list_purchase_history(
+    customer_id: UUID,
+    session: SessionDep,
+    context: OwnerManagerDep,
+    request_id: RequestIdDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Envelope[Page[CustomerPurchaseRow]]:
+    """Completed sales across every branch, newest first."""
+    rows, total = await service.list_purchase_history(
+        session, context, customer_id, limit=limit, offset=offset
+    )
+    items = [
+        CustomerPurchaseRow(
+            sale_id=sale.id,
+            store_id=sale.store_id,
+            receipt_number=sale.receipt_number,
+            total=sale.total,
+            status=str(sale.status.value) if hasattr(sale.status, "value") else str(sale.status),
+            created_at=sale.created_at,
+        )
+        for sale in rows
+    ]
+    return Envelope(data=Page(items=items, total=total), request_id=request_id)

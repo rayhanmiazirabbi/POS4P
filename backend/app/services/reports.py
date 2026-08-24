@@ -9,18 +9,25 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.context import RequestContext
+from app.domains.customers import Customer
 from app.domains.inventory import InventoryBatch, InventoryMovement, InventoryMovementType
 from app.domains.payments import Payment, PaymentMethod, PaymentRefund, PaymentStatus
 from app.domains.products import PharmacyProduct
 from app.domains.reports import DailyStoreMetric, StoreExpense
 from app.domains.sales import Sale, SaleItem, SaleItemBatchAllocation, SaleReturn, SaleStatus
+from app.errors import Forbidden, ValidationError
 from app.models import Role, Store, StoreProduct
 from app.schemas.reports import (
+    BranchRollupResponse,
+    BranchRollupRow,
+    ComparisonResponse,
     DailyMetricResponse,
     ExpenseCreateRequest,
     ExpiryWarning,
     LowStockItem,
     TodayMetricsResponse,
+    TopCustomerRow,
+    TopProductRow,
 )
 from app.security import utc_now
 from app.services.audit import record_audit, redact
@@ -482,3 +489,203 @@ async def _product_names(
         .where(StoreProduct.id.in_(ids))
     )
     return {store_product_id: name or store_product_id for store_product_id, name in rows.all()}
+
+
+# --- stage 2: comparisons, rollups, and analysis ------------------------------
+
+
+async def period_metrics(
+    session: AsyncSession,
+    context: RequestContext,
+    store: Store,
+    start: datetime,
+    end: datetime,
+) -> TodayMetricsResponse:
+    """The today-metrics computation over an explicit instant window.
+
+    Comparisons reuse the exact same aggregation as the daily view so a period can
+    never disagree with what ``/reports/today`` would have said about its days.
+    """
+    sales_total, transaction_count = await _gross_sales(session, context, store, start, end)
+    refund_total = await _refund_total(session, context, store, start, end)
+    breakdown = await _payment_breakdown(session, context, store, start, end)
+    profit: Decimal | None = None
+    if can_see_profit(context):
+        cost_total = await _cost_of_goods_sold(session, context, store, start, end)
+        profit = (sales_total - refund_total - cost_total).quantize(CENT)
+    return TodayMetricsResponse(
+        business_date=start.date(),
+        sales_total=sales_total,
+        refund_total=refund_total,
+        net_sales_total=(sales_total - refund_total).quantize(CENT),
+        transaction_count=transaction_count,
+        payment_breakdown=breakdown,
+        collected_total=collected_from(breakdown),
+        due_total=breakdown.get(PaymentMethod.DUE.value, Decimal(0)),
+        expense_total=Decimal(0),
+        profit=profit,
+        as_of=start,
+    )
+
+
+def previous_window(start: datetime, end: datetime) -> tuple[datetime, datetime]:
+    """The window of equal length immediately before ``[start, end)``."""
+    length = end - start
+    return start - length, end - length
+
+
+async def sales_comparison(
+    session: AsyncSession, context: RequestContext, *, as_of: datetime | None = None
+) -> ComparisonResponse:
+    """This trading day versus the trading day before it, on branch time."""
+    store = await load_current_store(session, context)
+    start, end, _day = _day_window(store, moment=as_of)
+    prev_start, prev_end = previous_window(start, end)
+    current = await period_metrics(session, context, store, start, end)
+    previous = await period_metrics(session, context, store, prev_start, prev_end)
+    if previous.sales_total == 0:
+        change = Decimal("100.00") if current.sales_total > 0 else Decimal("0.00")
+    else:
+        change = (
+            (current.sales_total - previous.sales_total)
+            / previous.sales_total
+            * Decimal(100)
+        ).quantize(Decimal("0.01"))
+    return ComparisonResponse(current=current, previous=previous, sales_change=change)
+
+
+async def branch_rollup(
+    session: AsyncSession,
+    context: RequestContext,
+    *,
+    as_of: datetime | None = None,
+) -> BranchRollupResponse:
+    """One organization-wide trading day, per branch; owner/manager only."""
+    if not can_see_profit(context):
+        raise Forbidden("Branch rollup requires owner or manager")
+    stores = list(
+        await session.scalars(
+            select(Store).where(Store.organization_id == context.organization_id).order_by(Store.code)
+        )
+    )
+    rows: list[BranchRollupRow] = []
+    business_day = business_date(stores[0]) if stores else utc_now().date()
+    for store in stores:
+        start, end, day = _day_window(store, moment=as_of)
+        business_day = day
+        sales_total, count = await _gross_sales(session, context, store, start, end)
+        refund_total = await _refund_total(session, context, store, start, end)
+        rows.append(
+            BranchRollupRow(
+                store_id=store.id,
+                store_name=store.name,
+                business_date=day,
+                sales_total=sales_total,
+                refund_total=refund_total,
+                net_sales_total=(sales_total - refund_total).quantize(CENT),
+                transaction_count=count,
+            )
+        )
+    return BranchRollupResponse(
+        business_date=business_day,
+        rows=rows,
+        total_sales=sum((r.sales_total for r in rows), Decimal(0)).quantize(CENT),
+        total_transactions=sum(r.transaction_count for r in rows),
+    )
+
+
+async def top_products(
+    session: AsyncSession,
+    context: RequestContext,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 10,
+) -> list[TopProductRow]:
+    """Best sellers by revenue inside an optional window across all branches.
+
+    Revenue is line revenue net of nothing -- refunds land as their own negative
+    lines in a fuller export, but the ranking question is "what sells", which net
+    figures answer worse.
+    """
+    if limit < 1 or limit > 50:
+        raise ValidationError("limit must be between 1 and 50")
+    scope = [
+        Sale.organization_id == context.organization_id,
+        Sale.status == SaleStatus.COMPLETED,
+    ]
+    if start is not None:
+        scope.append(Sale.created_at >= start)
+    if end is not None:
+        scope.append(Sale.created_at < end)
+    rows = await session.execute(
+        select(
+            SaleItem.store_product_id,
+            SaleItem.product_name,
+            func.sum(SaleItem.quantity),
+            func.sum(SaleItem.line_total),
+        )
+        .select_from(SaleItem)
+        .join(Sale, Sale.id == SaleItem.sale_id)
+        .where(*scope)
+        .group_by(SaleItem.store_product_id, SaleItem.product_name)
+        .order_by(func.sum(SaleItem.line_total).desc())
+        .limit(limit)
+    )
+    return [
+        TopProductRow(
+            store_product_id=product_id,
+            product_name=name or str(product_id),
+            quantity_sold=_money(qty),
+            revenue=_money(revenue).quantize(CENT),
+        )
+        for product_id, name, qty, revenue in rows.all()
+    ]
+
+
+async def top_customers(
+    session: AsyncSession,
+    context: RequestContext,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 10,
+) -> list[TopCustomerRow]:
+    """Highest-spending identified customers across branches; owner/manager only."""
+    if not can_see_profit(context):
+        raise Forbidden("Customer analysis requires owner or manager")
+    if limit < 1 or limit > 50:
+        raise ValidationError("limit must be between 1 and 50")
+    scope = [
+        Sale.organization_id == context.organization_id,
+        Sale.status == SaleStatus.COMPLETED,
+        Sale.customer_id.is_not(None),
+    ]
+    if start is not None:
+        scope.append(Sale.created_at >= start)
+    if end is not None:
+        scope.append(Sale.created_at < end)
+    rows = await session.execute(
+        select(
+            Sale.customer_id,
+            func.coalesce(Customer.name, ""),
+            func.count(),
+            func.sum(Sale.total),
+        )
+        .select_from(Sale)
+        .outerjoin(Customer, Customer.id == Sale.customer_id)
+        .where(*scope)
+        .group_by(Sale.customer_id, Customer.name)
+        .order_by(func.sum(Sale.total).desc())
+        .limit(limit)
+    )
+    result_rows = rows.all()
+    return [
+        TopCustomerRow(
+            customer_id=customer_id,
+            customer_name=name or f"Customer {customer_id}",
+            sale_count=int(count),
+            total_spent=_money(spent).quantize(CENT),
+        )
+        for customer_id, name, count, spent in result_rows
+    ]

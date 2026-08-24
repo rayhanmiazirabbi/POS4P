@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, status
 
 from app.context import RequestContext
 from app.dependencies import (
+    ContextDep,
     RequestIdDep,
     SessionDep,
     StoreContextDep,
@@ -15,12 +16,16 @@ from app.dependencies import (
 from app.models import Role
 from app.schemas.base import Envelope, Page
 from app.schemas.reports import (
+    BranchRollupResponse,
+    ComparisonResponse,
     DailyMetricResponse,
     ExpenseCreateRequest,
     ExpenseResponse,
     ExpiryWarning,
     LowStockItem,
     TodayMetricsResponse,
+    TopCustomerRow,
+    TopProductRow,
 )
 from app.services import reports as service
 
@@ -127,3 +132,62 @@ async def create_expense(
 ) -> Envelope[ExpenseResponse]:
     expense = await service.create_expense(session, context, payload, request_id=request_id)
     return Envelope(data=ExpenseResponse.model_validate(expense), request_id=request_id)
+
+
+@router.get("/comparison", response_model=Envelope[ComparisonResponse])
+async def read_sales_comparison(
+    session: SessionDep,
+    context: StoreContextDep,
+    request_id: RequestIdDep,
+    as_of: AsOfQuery = None,
+) -> Envelope[ComparisonResponse]:
+    """Today versus yesterday on branch time; profit redacted by role."""
+    result = await service.sales_comparison(session, context, as_of=as_of)
+    if not service.can_see_profit(context):
+        result.current.profit = None
+        result.previous.profit = None
+    return Envelope(data=result, request_id=request_id)
+
+
+@router.get("/branch-rollup", response_model=Envelope[BranchRollupResponse])
+async def read_branch_rollup(
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+    as_of: AsOfQuery = None,
+) -> Envelope[BranchRollupResponse]:
+    """Organization-wide trading-day rollup per branch (owner/manager only)."""
+    result = await service.branch_rollup(session, context, as_of=as_of)
+    return Envelope(data=result, request_id=request_id)
+
+
+@router.get("/top-products", response_model=Envelope[list[TopProductRow]])
+async def read_top_products(
+    session: SessionDep,
+    context: ContextDep,
+    request_id: RequestIdDep,
+    date_from: Annotated[datetime | None, Query(alias="from")] = None,
+    date_to: Annotated[datetime | None, Query(alias="to")] = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> Envelope[list[TopProductRow]]:
+    """Best sellers by revenue across the organization in an optional window."""
+    rows = await service.top_products(
+        session, context, start=date_from, end=date_to, limit=limit
+    )
+    return Envelope(data=rows, request_id=request_id)
+
+
+@router.get("/top-customers", response_model=Envelope[list[TopCustomerRow]])
+async def read_top_customers(
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+    date_from: Annotated[datetime | None, Query(alias="from")] = None,
+    date_to: Annotated[datetime | None, Query(alias="to")] = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> Envelope[list[TopCustomerRow]]:
+    """Highest-spending identified customers (owner/manager only)."""
+    rows = await service.top_customers(
+        session, context, start=date_from, end=date_to, limit=limit
+    )
+    return Envelope(data=rows, request_id=request_id)

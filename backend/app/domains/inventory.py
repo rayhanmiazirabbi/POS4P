@@ -12,9 +12,11 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import (
     AppendOnlyMixin,
     Base,
+    OrganizationScopedMixin,
     StoreScopedMixin,
     TimestampMixin,
     UUIDPrimaryKeyMixin,
+    enum_column,
     money_column,
     quantity_column,
 )
@@ -76,6 +78,42 @@ class StockReservation(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Ba
     quantity: Mapped[Decimal] = mapped_column(quantity_column(), nullable=False)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TransferStatus(str, Enum):
+    DRAFT = "draft"
+    IN_TRANSIT = "in_transit"
+    RECEIVED = "received"
+    CANCELLED = "cancelled"
+
+
+class StockTransfer(OrganizationScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "stock_transfers"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "transfer_number"),
+        Index("ix_stock_transfers_org_status", "organization_id", "status"),
+    )
+
+    transfer_number: Mapped[str] = mapped_column(String(60), nullable=False)
+    from_store_id: Mapped[UUID] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    to_store_id: Mapped[UUID] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    status: Mapped[TransferStatus] = mapped_column(
+        enum_column(TransferStatus), nullable=False, default=TransferStatus.DRAFT
+    )
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+
+
+class StockTransferItem(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "stock_transfer_items"
+    __table_args__ = (UniqueConstraint("transfer_id", "store_product_id"),)
+
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
+    transfer_id: Mapped[UUID] = mapped_column(ForeignKey("stock_transfers.id"), nullable=False)
+    store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(quantity_column(), nullable=False)
 
 
 @dataclass(frozen=True)

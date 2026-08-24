@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
-
-from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Header, Query, status
 from sqlalchemy import select
 
 from app.context import RequestContext
 from app.dependencies import ContextDep, RequestIdDep, SessionDep, require_roles
-from app.domains.inventory import InventoryBatch, InventoryBalance
+from app.domains.inventory import InventoryBalance, InventoryBatch
 from app.errors import ValidationError
 from app.models import Role
 from app.schemas.base import Envelope
@@ -22,10 +21,12 @@ from app.schemas.inventory import (
     ExpiringBatchResponse,
     LowStockResponse,
     MovementResponse,
+    RebuildResultResponse,
     ReceiveBatchRequest,
     ReceiveBatchResponse,
-    RebuildResultResponse,
     StockResponse,
+    TransferCreateRequest,
+    TransferResponse,
 )
 from app.services import inventory as service
 
@@ -248,3 +249,86 @@ async def rebuild_balances(
         data=RebuildResultResponse(store_id=store_id, rebuilt=len(rebuilt)),
         request_id=request_id,
     )
+
+
+# --- branch transfers ---------------------------------------------------------
+
+
+@router.get("/transfers", response_model=Envelope[list[TransferResponse]])
+async def list_transfers(
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+    status_filter: Annotated[str | None, Query(alias="statusFilter")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Envelope[list[TransferResponse]]:
+    """Transfers touching the caller's branch, newest first."""
+    from app.domains.inventory import TransferStatus
+
+    status_value = TransferStatus(status_filter) if status_filter else None
+    rows, _total = await service.list_transfers(
+        session, context, status_filter=status_value, limit=limit, offset=offset
+    )
+    return Envelope(
+        data=[TransferResponse.model_validate(t) for t in rows], request_id=request_id
+    )
+
+
+@router.post(
+    "/transfers",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Envelope[TransferResponse],
+    summary="Open a draft transfer between two branches (owner/manager only)",
+)
+async def create_transfer(
+    payload: TransferCreateRequest,
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[TransferResponse]:
+    transfer = await service.create_transfer(
+        session,
+        context,
+        from_store_id=payload.from_store_id,
+        to_store_id=payload.to_store_id,
+        items=[(line.store_product_id, line.quantity) for line in payload.items],
+        transfer_number=payload.transfer_number,
+        request_id=request_id,
+    )
+    return Envelope(data=TransferResponse.model_validate(transfer), request_id=request_id)
+
+
+@router.post("/transfers/{transfer_id}/ship", response_model=Envelope[TransferResponse])
+async def ship_transfer(
+    transfer_id: UUID,
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[TransferResponse]:
+    """FEFO-allocate at the source branch and put the transfer in transit."""
+    transfer = await service.ship_transfer(session, context, transfer_id, request_id=request_id)
+    return Envelope(data=TransferResponse.model_validate(transfer), request_id=request_id)
+
+
+@router.post("/transfers/{transfer_id}/receive", response_model=Envelope[TransferResponse])
+async def receive_transfer(
+    transfer_id: UUID,
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[TransferResponse]:
+    """Book the stock into the destination branch as fresh batches."""
+    transfer = await service.receive_transfer(session, context, transfer_id, request_id=request_id)
+    return Envelope(data=TransferResponse.model_validate(transfer), request_id=request_id)
+
+
+@router.post("/transfers/{transfer_id}/cancel", response_model=Envelope[TransferResponse])
+async def cancel_transfer(
+    transfer_id: UUID,
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[TransferResponse]:
+    transfer = await service.cancel_transfer(session, context, transfer_id, request_id=request_id)
+    return Envelope(data=TransferResponse.model_validate(transfer), request_id=request_id)

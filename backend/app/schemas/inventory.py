@@ -126,3 +126,29 @@ class MovementBatchPayload(ApiModel):
 class RebuildResultResponse(ApiModel):
     store_id: UUID
     rebuilt: NonNegativeInt
+
+
+class TransferLineRequest(ApiModel):
+    store_product_id: UUID
+    quantity: Decimal
+
+
+class TransferCreateRequest(ApiModel):
+    transfer_number: Annotated[str, Field(min_length=1, max_length=60)]
+    from_store_id: UUID
+    to_store_id: UUID
+    items: Annotated[list[TransferLineRequest], Field(min_length=1)]
+
+
+class TransferResponse(ApiModel):
+    id: UUID
+    transfer_number: str
+    from_store_id: UUID
+    to_store_id: UUID
+    status: str
+    shipped_at: datetime | None
+    received_at: datetime | None
+
+
+class TransferItemResponse(TransferLineRequest):
+    id: UUID

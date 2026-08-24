@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -16,10 +17,13 @@ from app.domains.inventory import (
     InventoryBatch,
     InventoryMovement,
     InventoryMovementType,
+    StockTransfer,
+    StockTransferItem,
+    TransferStatus,
     allocate_fefo,
     rebuild_balances,
 )
-from app.errors import DomainError, Forbidden, NotFound, ValidationError
+from app.errors import Conflict, DomainError, Forbidden, NotFound, ValidationError
 from app.models import Role, StoreProduct
 from app.security import utc_now
 from app.services.audit import record_audit, redact
@@ -172,6 +176,8 @@ async def receive_batch(
                 code="IDEMPOTENCY_CONFLICT",
             )
         batch = await session.get(InventoryBatch, existing.batch_id)
+        if batch is None:
+            raise NotFound("Batch not found")
         balance = await _balance_for(session, store_product)
         return batch, existing, balance
 
@@ -577,3 +583,320 @@ def to_allocation_result(result: AllocationResult) -> dict[str, object]:
 
 def now_utc() -> datetime:
     return utc_now()
+
+
+# --- branch transfers ---------------------------------------------------------
+
+
+def assert_transfer_role(context: RequestContext) -> None:
+    if context.role not in ADJUSTMENT_ROLES:
+        raise Forbidden("Transfers require owner or manager")
+
+
+async def load_transfer(
+    session: AsyncSession, context: RequestContext, transfer_id: UUID
+) -> StockTransfer:
+    """A transfer of another tenant does not exist for the caller."""
+    transfer = await session.get(StockTransfer, transfer_id)
+    if transfer is None or transfer.organization_id != context.organization_id:
+        raise NotFound("Transfer not found")
+    return transfer
+
+
+async def create_transfer(
+    session: AsyncSession,
+    context: RequestContext,
+    *,
+    from_store_id: UUID,
+    to_store_id: UUID,
+    items: list[tuple[UUID, Decimal]],
+    transfer_number: str,
+    request_id: str = "unknown",
+) -> StockTransfer:
+    """Open a draft transfer of named products from one branch to another.
+
+    The draft holds no stock; shipping is what moves the ledger. Idempotency comes
+    from the organization-scoped ``transfer_number``: a repeated number returns the
+    original draft rather than a second document.
+    """
+    assert_transfer_role(context)
+    if from_store_id == to_store_id:
+        raise ValidationError("Source and destination stores must differ")
+    source = await load_store(session, context, from_store_id)
+    await load_store(session, context, to_store_id)
+
+    existing = await session.scalar(
+        select(StockTransfer).where(
+            StockTransfer.organization_id == context.organization_id,
+            StockTransfer.transfer_number == transfer_number.strip(),
+        )
+    )
+    if existing is not None:
+        return existing
+    if not items:
+        raise ValidationError("A transfer needs at least one line")
+
+    transfer = StockTransfer(
+        organization_id=context.organization_id,
+        transfer_number=transfer_number.strip(),
+        from_store_id=source.id,
+        to_store_id=to_store_id,
+        status=TransferStatus.DRAFT,
+        created_by_user_id=context.user_id,
+    )
+    session.add(transfer)
+    await session.flush()
+    seen: set[UUID] = set()
+    for store_product_id, quantity in items:
+        if quantity <= 0:
+            raise ValidationError("Transfer quantities must be positive")
+        if store_product_id in seen:
+            raise ValidationError("Duplicate product lines are not allowed")
+        seen.add(store_product_id)
+        product = await load_store_product(session, context, store_product_id)
+        if product.store_id != source.id:
+            raise NotFound("Store product not found")
+        session.add(
+            StockTransferItem(
+                organization_id=context.organization_id,
+                transfer_id=transfer.id,
+                store_product_id=store_product_id,
+                quantity=quantity,
+            )
+        )
+    record_audit(
+        session,
+        context,
+        action="inventory.transfer_created",
+        entity_type="stock_transfer",
+        entity_id=transfer.id,
+        request_id=request_id,
+        after=redact(
+            {
+                "transfer_number": transfer.transfer_number,
+                "lines": len(items),
+            }
+        ),
+    )
+    await session.commit()
+    await session.refresh(transfer)
+    return transfer
+
+
+async def ship_transfer(
+    session: AsyncSession,
+    context: RequestContext,
+    transfer_id: UUID,
+    *,
+    request_id: str = "unknown",
+) -> StockTransfer:
+    """Allocate FEFO at the source branch and put the transfer in transit.
+
+    Shipping consumes stock transactionally -- ledger movements plus the balance
+    projection move together, so a failure leaves nothing half-shipped. A transfer
+    can only ship once; a second call returns the unchanged document.
+    """
+    assert_transfer_role(context)
+    transfer = await load_transfer(session, context, transfer_id)
+    if transfer.status is TransferStatus.RECEIVED:
+        raise Conflict("Transfer already received")
+    if transfer.status is TransferStatus.IN_TRANSIT:
+        return transfer
+    if transfer.status is TransferStatus.CANCELLED:
+        raise Conflict("Transfer cancelled")
+    if context.store_id != transfer.from_store_id:
+        raise Forbidden("Ship from the source branch")
+
+    items = list(
+        await session.scalars(
+            select(StockTransferItem).where(StockTransferItem.transfer_id == transfer.id)
+        )
+    )
+    now = utc_now()
+    for item in items:
+        result = await allocate_fefo_for_product(
+            session, context, item.store_product_id, Decimal(item.quantity)
+        )
+        if not result.ok:
+            raise InsufficientStock(
+                f"Cannot ship '{item.store_product_id}': shortfall {result.shortfall}"
+            )
+        await consume_allocations(
+            session,
+            context,
+            item.store_product_id,
+            result.allocations,
+            InventoryMovementType.TRANSFER,
+            reference_type="stock_transfer",
+            reference_id=transfer.id,
+        )
+    transfer.status = TransferStatus.IN_TRANSIT
+    transfer.shipped_at = now
+    record_audit(
+        session,
+        context,
+        action="inventory.transfer_shipped",
+        entity_type="stock_transfer",
+        entity_id=transfer.id,
+        request_id=request_id,
+        after=redact({"lines": len(items)}),
+    )
+    await session.commit()
+    await session.refresh(transfer)
+    return transfer
+
+
+async def receive_transfer(
+    session: AsyncSession,
+    context: RequestContext,
+    transfer_id: UUID,
+    *,
+    batch_number_prefix: str | None = None,
+    request_id: str = "unknown",
+) -> StockTransfer:
+    """Receive an in-transit transfer into the destination branch.
+
+    Each line becomes a receipt movement against a fresh destination batch (one
+    per transfer line), bumping that branch's balance projection. Receiving is
+    idempotent by status: an already-received transfer returns unchanged.
+    """
+    assert_transfer_role(context)
+    transfer = await load_transfer(session, context, transfer_id)
+    if transfer.status is TransferStatus.RECEIVED:
+        return transfer
+    if transfer.status is not TransferStatus.IN_TRANSIT:
+        raise Conflict("Transfer has not shipped")
+    if context.store_id != transfer.to_store_id:
+        raise Forbidden("Receive at the destination branch")
+
+    items = list(
+        await session.scalars(
+            select(StockTransferItem).where(StockTransferItem.transfer_id == transfer.id)
+        )
+    )
+    now = utc_now()
+    prefix = batch_number_prefix or f"TRF-{transfer.transfer_number}"
+    for item in items:
+        # The destination's own listing of the same product is the target; the
+        # source row belongs to another branch and must never be reused.
+        destination_rows = (
+            await session.execute(
+                select(StoreProduct).where(
+                    StoreProduct.store_id == transfer.to_store_id,
+                    StoreProduct.pharmacy_product_id
+                    == select(StoreProduct.pharmacy_product_id).where(
+                        StoreProduct.id == item.store_product_id
+                    ).scalar_subquery(),
+                )
+            )
+        ).scalars()
+        destination = destination_rows.first()
+        if destination is None:
+            raise ValidationError(
+                f"Destination branch does not carry product '{item.store_product_id}'"
+            )
+        batch = InventoryBatch(
+            organization_id=context.organization_id,
+            store_id=destination.store_id,
+            store_product_id=destination.id,
+            batch_number=f"{prefix}-{item.store_product_id}"[:100],
+            expiry_date=None,
+            unit_cost=Decimal(0),
+            received_at=now,
+            active=True,
+        )
+        session.add(batch)
+        await session.flush()
+        movement = InventoryMovement(
+            organization_id=context.organization_id,
+            store_id=destination.store_id,
+            store_product_id=destination.id,
+            batch_id=batch.id,
+            movement_type=InventoryMovementType.RECEIPT,
+            quantity=Decimal(item.quantity),
+            reference_type="stock_transfer",
+            reference_id=transfer.id,
+            idempotency_key=str(uuid4()),
+            occurred_at=now,
+            actor_user_id=context.user_id,
+        )
+        session.add(movement)
+        await _apply_to_balance(session, destination, Decimal(item.quantity))
+    transfer.status = TransferStatus.RECEIVED
+    transfer.received_at = now
+    record_audit(
+        session,
+        context,
+        action="inventory.transfer_received",
+        entity_type="stock_transfer",
+        entity_id=transfer.id,
+        request_id=request_id,
+        after=redact({"lines": len(items)}),
+    )
+    await session.commit()
+    await session.refresh(transfer)
+    return transfer
+
+
+async def cancel_transfer(
+    session: AsyncSession,
+    context: RequestContext,
+    transfer_id: UUID,
+    *,
+    request_id: str = "unknown",
+) -> StockTransfer:
+    """Cancel a draft; shipped transfers must be received or investigated instead."""
+    assert_transfer_role(context)
+    transfer = await load_transfer(session, context, transfer_id)
+    if transfer.status is TransferStatus.CANCELLED:
+        return transfer
+    if transfer.status is not TransferStatus.DRAFT:
+        raise Conflict("Only draft transfers can be cancelled")
+    transfer.status = TransferStatus.CANCELLED
+    transfer.cancelled_at = utc_now()
+    record_audit(
+        session,
+        context,
+        action="inventory.transfer_cancelled",
+        entity_type="stock_transfer",
+        entity_id=transfer.id,
+        request_id=request_id,
+    )
+    await session.commit()
+    await session.refresh(transfer)
+    return transfer
+
+
+async def list_transfers(
+    session: AsyncSession,
+    context: RequestContext,
+    *,
+    status_filter: TransferStatus | None = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[list[StockTransfer], int]:
+    """Transfers touching the caller's branch, newest first, with total count."""
+    scope: tuple[Any, ...]
+    if context.store_id is not None:
+        scope = (
+            StockTransfer.organization_id == context.organization_id,
+            (StockTransfer.from_store_id == context.store_id)
+            | (StockTransfer.to_store_id == context.store_id),
+        )
+    else:
+        scope = (StockTransfer.organization_id == context.organization_id,)
+    if status_filter is not None:
+        scope = (*scope, StockTransfer.status == status_filter)
+    total = int(
+        await session.scalar(select(func.count()).select_from(StockTransfer).where(*scope)) or 0
+    )
+    rows = list(
+        await session.scalars(
+            select(StockTransfer)
+            .where(*scope)
+            .order_by(StockTransfer.created_at.desc(), StockTransfer.id)
+            .limit(limit)
+            .offset(offset)
+        )
+    )
+    return rows, total

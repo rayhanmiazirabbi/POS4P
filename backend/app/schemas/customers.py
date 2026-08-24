@@ -89,3 +89,12 @@ class CustomerHistorySummary(ApiModel):
     total_spent: Decimal | None = None
     total_refunded: Decimal
     total_due: Decimal
+
+
+class CustomerPurchaseRow(ApiModel):
+    sale_id: UUID
+    store_id: UUID
+    receipt_number: str | None
+    total: Decimal
+    status: str
+    created_at: datetime

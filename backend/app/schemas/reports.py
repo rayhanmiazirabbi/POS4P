@@ -98,3 +98,40 @@ class ExpiryWarning(ApiModel):
     expiry_date: date
     available: Decimal
     days_until_expiry: int
+
+
+class ComparisonResponse(ApiModel):
+    current: TodayMetricsResponse
+    previous: TodayMetricsResponse
+    sales_change: Decimal
+
+
+class BranchRollupRow(ApiModel):
+    store_id: UUID
+    store_name: str
+    business_date: date
+    sales_total: Decimal
+    refund_total: Decimal
+    net_sales_total: Decimal
+    transaction_count: int
+
+
+class BranchRollupResponse(ApiModel):
+    business_date: date
+    rows: list[BranchRollupRow]
+    total_sales: Decimal
+    total_transactions: int
+
+
+class TopProductRow(ApiModel):
+    store_product_id: UUID
+    product_name: str
+    quantity_sold: Decimal
+    revenue: Decimal
+
+
+class TopCustomerRow(ApiModel):
+    customer_id: UUID | None
+    customer_name: str
+    sale_count: int
+    total_spent: Decimal
