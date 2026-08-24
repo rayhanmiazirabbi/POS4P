@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     otp_max_requests_per_window: int = 3
     pin_max_attempts: int = 5
     pin_lockout_seconds: int = 900
+    billing_webhook_secret: str = "development-only-billing-webhook-secret"
+    billing_grace_period_days: int = 7
+    billing_trial_days: int = 14
+    billing_period_days: int = 30
+    supplier_invite_ttl_days: int = 14
+    audit_signing_secret: str = "development-only-audit-signing-secret"
+    audit_retention_days: int = 3650
 
 
 @lru_cache

@@ -6,7 +6,10 @@ from fastapi import FastAPI, Request
 
 from app.errors import register_exception_handlers
 from app.routers import (
+    ai_router,
+    audit_router,
     auth_router,
+    billing_router,
     ecommerce_router,
     orders_router,
     prescriptions_router,
@@ -22,6 +25,7 @@ from app.routers import (
     reports_router,
     sales_router,
     stores_router,
+    supplier_network_router,
     suppliers_router,
     sync_router,
     users_router,
@@ -49,11 +53,11 @@ for router in (
     catalog_router,
     products_router,
     suppliers_router,
+    supplier_network_router,
     inventory_router,
     loyalty_router,
     purchasing_router,
     customers_router,
-    loyalty_router,
     payments_router,
     sales_router,
     reports_router,
@@ -62,6 +66,9 @@ for router in (
     orders_router,
     prescriptions_router,
     storefront_router,
+    ai_router,
+    billing_router,
+    audit_router,
 ):
     app.include_router(router)
 

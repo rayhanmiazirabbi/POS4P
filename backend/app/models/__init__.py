@@ -2,6 +2,7 @@ from app.domains.ai import AIConfirmation, AIJob, AIJobStatus
 from app.domains.billing import (
     BillingInvoice,
     BillingPlan,
+    BillingProviderEvent,
     OrganizationSubscription,
     SubscriptionStatus,
 )
@@ -32,6 +33,12 @@ from app.domains.purchasing import Purchase, PurchaseItem
 from app.domains.reports import DailyStoreMetric, StoreExpense
 from app.domains.sales import Sale, SaleItem, SaleItemBatchAllocation, SaleReturn
 from app.domains.suppliers import Supplier, SupplierLedgerEntry, SupplierProduct
+from app.domains.supplier_network import (
+    AcknowledgementStatus,
+    NetworkInviteStatus,
+    PurchaseAcknowledgement,
+    SupplierNetworkInvite,
+)
 from app.domains.sync import Device, DeviceStatus, StoreSequence, SyncCheckpoint, SyncEvent, SyncFeedItem
 from app.models.base import Base
 from app.models.cross_cutting import AuditLog, IdempotencyRecord, OutboxEvent
@@ -51,12 +58,14 @@ __all__ = [
     "AIConfirmation",
     "AIJob",
     "AIJobStatus",
+    "AcknowledgementStatus",
     "ActiveIngredient",
     "AuditLog",
     "AuthChallenge",
     "Base",
     "BillingInvoice",
     "BillingPlan",
+    "BillingProviderEvent",
     "CatalogAlias",
     "CatalogBarcode",
     "CatalogProduct",
@@ -76,6 +85,7 @@ __all__ = [
     "LoyaltyAccount",
     "LoyaltyTransaction",
     "Manufacturer",
+    "NetworkInviteStatus",
     "Order",
     "OrderItem",
     "OrderStatusHistory",
@@ -90,6 +100,7 @@ __all__ = [
     "PrescriptionFile",
     "PrescriptionReview",
     "Purchase",
+    "PurchaseAcknowledgement",
     "PurchaseItem",
     "RecordStatus",
     "Role",
@@ -108,6 +119,7 @@ __all__ = [
     "SubscriptionStatus",
     "Supplier",
     "SupplierLedgerEntry",
+    "SupplierNetworkInvite",
     "SupplierProduct",
     "StoreSequence",
     "SyncCheckpoint",

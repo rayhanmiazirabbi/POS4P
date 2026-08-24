@@ -71,7 +71,7 @@ This index defines the implementation order and shared rules for the 41 module p
 3. POS: payments, sales, customers, reports, all three application shells, sync.
 4. [x] Retention and multi-store: loyalty, customer history, transfers, richer reports, device management.
 5. [x] Commerce: ecommerce, orders, prescriptions, online checkout and listings.
-6. Automation and platform: AI, billing, audit hardening, OCR, anomaly detection, supplier-network workflows.
+6. [x] Automation and platform: AI, billing, audit hardening, OCR, anomaly detection, supplier-network workflows.
 
 ## Required integration checks
 

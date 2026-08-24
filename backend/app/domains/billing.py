@@ -54,3 +54,20 @@ class BillingInvoice(OrganizationScopedMixin, UUIDPrimaryKeyMixin, Base):
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class BillingProviderEvent(UUIDPrimaryKeyMixin, Base):
+    """Every accepted provider webhook, keyed by its id for replay safety.
+
+    The provider retries deliveries it considers unacknowledged, so the event id
+    is the only reliable deduplication boundary: processing must be a no-op when
+    the id has been seen before.
+    """
+
+    __tablename__ = "billing_provider_events"
+
+    provider_event_id: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    organization_id: Mapped[UUID | None] = mapped_column(ForeignKey("organizations.id"))
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

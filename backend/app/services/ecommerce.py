@@ -12,6 +12,7 @@ from app.domains.ecommerce import EcommerceProductSetting, Storefront
 from app.domains.products import PharmacyProduct, StoreProduct
 from app.errors import Conflict, NotFound, ValidationError
 from app.models import Organization, Role
+from app.services import billing
 from app.services.audit import record_audit
 
 
@@ -65,6 +66,9 @@ async def upsert_storefront(
         if slug_clash is not None:
             raise Conflict("Storefront slug is already used by another branch of this organization")
     if payload.custom_domain is not None:
+        # A vanity domain is a paid feature: the entitlement is checked here, at
+        # the exact mutation that would use it, not merely in the UI.
+        await billing.ensure_entitlement(session, context.organization_id, "custom_domain")
         # Checked on updates too -- moving a storefront onto a domain another
         # tenant already owns is exactly when the clash happens.
         domain_query = select(Storefront).where(
