@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="PHARMACY_", extra="ignore")
 
     environment: str = "development"
+    # Comma-separated list, or a JSON list, via PHARMACY_CORS_ORIGINS.
+    cors_origins: list[str] = ["http://localhost:3000"]
     database_url: str = "postgresql+asyncpg://pharmacy:pharmacy@localhost:5432/pharmacy"
     secret_key: str = "development-only-secret-change-me"
     access_token_minutes: int = 15

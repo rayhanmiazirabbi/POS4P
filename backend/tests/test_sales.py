@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from app.context import RequestContext
 from app.domains.inventory import InventoryBalance, InventoryBatch, InventoryMovement
 from app.domains.payments import Payment, PaymentMethod, PaymentRefund
-from app.domains.sales import Sale, SaleStatus
+from app.domains.sales import Sale, SaleReturn, SaleStatus
 from app.models import AuditLog, Customer, OutboxEvent, Role, StoreProduct
 from app.models import Session as SessionModel
 from app.security import generate_token, hash_token, utc_now
@@ -30,6 +30,15 @@ def _headers(tenant: dict[str, Any], *, role: Role = Role.OWNER) -> dict[str, st
         store_id=tenant["store"].id,
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def _return_headers(tenant: dict[str, Any], key: str) -> dict[str, str]:
+    """Headers for a return, keyed so each distinct return is its own request.
+
+    ``/returns`` is idempotent, so two returns against one sale need two keys;
+    reusing one is exactly what these tests must not accidentally do.
+    """
+    return {**_headers(tenant), "Idempotency-Key": f"return-key-{key}"}
 
 
 async def _make_store_product(
@@ -312,7 +321,7 @@ async def test_return_restores_stock_and_limits_quantity(
     returned = await client.post(
         f"/sales/{sale_id}/returns",
         json={"reason": "Damaged", "lines": [{"saleItemId": item_id, "quantity": "1"}]},
-        headers=_headers(tenant),
+        headers=_return_headers(tenant, "damaged"),
     )
     assert returned.status_code == 201, returned.text
     assert returned.json()["data"]["total"] == "-10.00"  # 1 unit at 10.00
@@ -323,7 +332,7 @@ async def test_return_restores_stock_and_limits_quantity(
     over = await client.post(
         f"/sales/{sale_id}/returns",
         json={"reason": "Again", "lines": [{"saleItemId": item_id, "quantity": "2"}]},
-        headers=_headers(tenant),
+        headers=_return_headers(tenant, "again"),
     )
     assert over.status_code == 409
 
@@ -364,7 +373,7 @@ async def test_a_product_on_two_lines_can_be_returned_in_full(
                 {"saleItemId": second, "quantity": "3"},
             ],
         },
-        headers=_headers(tenant),
+        headers=_return_headers(tenant, "changed-mind"),
     )
     assert full.status_code == 201, full.text
     assert full.json()["data"]["total"] == "-50.00"  # 5 units at 10.00
@@ -377,7 +386,7 @@ async def test_a_product_on_two_lines_can_be_returned_in_full(
     over = await client.post(
         f"/sales/{data['id']}/returns",
         json={"reason": "One more", "lines": [{"saleItemId": first, "quantity": "1"}]},
-        headers=_headers(tenant),
+        headers=_return_headers(tenant, "one-more"),
     )
     assert over.status_code == 409, over.text
 
@@ -409,7 +418,7 @@ async def test_a_returned_sale_cannot_then_be_voided(
     returned = await client.post(
         f"/sales/{data['id']}/returns",
         json={"reason": "One damaged", "lines": [{"saleItemId": data["items"][0]["id"], "quantity": "1"}]},
-        headers=_headers(tenant),
+        headers=_return_headers(tenant, "one-damaged"),
     )
     assert returned.status_code == 201, returned.text
 
@@ -432,7 +441,7 @@ async def test_a_returned_sale_cannot_then_be_voided(
     rest = await client.post(
         f"/sales/{data['id']}/returns",
         json={"reason": "Rung up in error", "lines": [{"saleItemId": data["items"][0]["id"], "quantity": "1"}]},
-        headers=_headers(tenant),
+        headers=_return_headers(tenant, "the-rest"),
     )
     assert rest.status_code == 201, rest.text
     session.expunge_all()
@@ -472,7 +481,7 @@ async def test_return_on_due_sale_reduces_customer_due(
             "reason": "Wrong item",
             "lines": [{"saleItemId": data["items"][0]["id"], "quantity": "2"}],
         },
-        headers=_headers(tenant),
+        headers=_return_headers(tenant, "wrong-item"),
     )
     session.expunge_all()
     refreshed = await session.get(Customer, customer.id)
@@ -517,7 +526,7 @@ async def test_return_records_a_refund_against_the_tendered_payment(
             "reason": "Wrong item",
             "lines": [{"saleItemId": data["items"][0]["id"], "quantity": "1"}],
         },
-        headers=_headers(tenant),
+        headers=_return_headers(tenant, "wrong-item"),
     )
     assert returned.status_code == 201, returned.text
 
@@ -536,6 +545,223 @@ async def test_return_records_a_refund_against_the_tendered_payment(
     session.expunge_all()
     refreshed = await session.get(Customer, customer.id)
     assert Decimal(refreshed.due_balance) == Decimal("2.00")
+
+
+async def test_a_return_refunds_what_the_discounted_sale_actually_took(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    """A discounted sale must not refund more than it collected.
+
+    ``sales.discount`` is a cart-level figure and ``sale_items`` has no discount
+    column, so the refund used to be priced off ``unit_price`` -- the pre-discount
+    price. A cart of 100.00 sold for 80.00 refunded the full 100.00, so the shop
+    paid 20.00 to accept the return, and ``refund_payments`` capping each tender
+    was the only thing keeping the loss down to the amount tendered.
+    """
+    sp = await _make_store_product(session, tenant)
+    await _receive(session, tenant, sp.id, quantity="10")
+    data = await _create_sale(
+        client,
+        tenant,
+        {
+            "items": [{"storeProductId": str(sp.id), "quantity": "10"}],
+            "discount": "20.00",
+            "payments": [{"method": "cash", "amount": "80.00", "receivedAmount": "80.00"}],
+        },
+    )
+    assert data["total"] == "80.00"
+
+    returned = await client.post(
+        f"/sales/{data['id']}/returns",
+        json={"reason": "All back", "lines": [{"saleItemId": data["items"][0]["id"], "quantity": "10"}]},
+        headers=_return_headers(tenant, "discounted-full"),
+    )
+    assert returned.status_code == 201, returned.text
+    # 80.00 was taken, so 80.00 goes back -- not the 100.00 the line was rung at.
+    assert returned.json()["data"]["total"] == "-80.00"
+    refunds = list(await session.scalars(select(PaymentRefund)))
+    assert sum(Decimal(refund.amount) for refund in refunds) == Decimal("80.00")
+
+
+async def test_partial_returns_of_an_uneven_discount_add_up_exactly(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    """Three partial returns of a net value that does not divide by three.
+
+    30.00 less 10.00 is 20.00 over 3 units: 6.666... each. Rounding each return
+    independently pays 6.67 three times and hands over a cent the till never took;
+    truncating pays 6.66 three times and keeps one. Each refund is the difference
+    between the value of everything returned so far and the value of everything
+    returned before it, so the three add up to exactly 20.00.
+    """
+    sp = await _make_store_product(session, tenant)
+    await _receive(session, tenant, sp.id, quantity="10")
+    data = await _create_sale(
+        client,
+        tenant,
+        {
+            "items": [{"storeProductId": str(sp.id), "quantity": "3"}],
+            "discount": "10.00",
+            "payments": [{"method": "cash", "amount": "20.00", "receivedAmount": "20.00"}],
+        },
+    )
+    item_id = data["items"][0]["id"]
+
+    for index in range(3):
+        one = await client.post(
+            f"/sales/{data['id']}/returns",
+            json={"reason": "One back", "lines": [{"saleItemId": item_id, "quantity": "1"}]},
+            headers=_return_headers(tenant, f"third-{index}"),
+        )
+        assert one.status_code == 201, one.text
+
+    refunds = list(await session.scalars(select(PaymentRefund)))
+    assert sum(Decimal(refund.amount) for refund in refunds) == Decimal("20.00")
+    returns = list(await session.scalars(select(SaleReturn)))
+    assert sum(Decimal(row.total) for row in returns) == Decimal("-20.00")
+
+
+async def test_a_return_is_accepted_when_the_sale_emptied_the_shelf(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    """The last box sold must still be returnable.
+
+    Restoring stock used to run the FEFO *allocator*, which only considers batches
+    with stock on the shelf -- so a sale that cleared the shelf left nothing to
+    allocate against and the return was refused outright, with no way to pay the
+    customer back at all. A return is a credit against movements that already
+    exist; it needs no availability check.
+    """
+    sp = await _make_store_product(session, tenant)
+    await _receive(session, tenant, sp.id, quantity="2")
+    data = await _create_sale(
+        client,
+        tenant,
+        {
+            "items": [{"storeProductId": str(sp.id), "quantity": "2"}],
+            "payments": [{"method": "cash", "amount": "20.00", "receivedAmount": "20.00"}],
+        },
+    )
+    session.expunge_all()
+    balance = await session.scalar(select(InventoryBalance))
+    assert Decimal(balance.on_hand) == Decimal("0")
+
+    returned = await client.post(
+        f"/sales/{data['id']}/returns",
+        json={"reason": "Both back", "lines": [{"saleItemId": data["items"][0]["id"], "quantity": "2"}]},
+        headers=_return_headers(tenant, "empty-shelf"),
+    )
+    assert returned.status_code == 201, returned.text
+    session.expunge_all()
+    balance = await session.scalar(select(InventoryBalance))
+    assert Decimal(balance.on_hand) == Decimal("2")
+
+
+async def test_returned_units_go_back_to_the_batch_they_were_sold_from(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    """Stock returns to its own batch, not to whichever batch FEFO picks today.
+
+    Re-running the allocator could put the units in a different batch than they
+    left, and reports value returned stock at the receiving batch's ``unit_cost``
+    -- so a unit sold from the older batch and restored into the newer one
+    silently mis-stated gross profit and left both batch counts wrong. The sale's
+    own ``sale_item_batch_allocations`` rows say where each unit came from.
+    """
+    sp = await _make_store_product(session, tenant)
+    first = await _receive(session, tenant, sp.id, quantity="3", batch_number="B-NEAR", expiry_days=30)
+    second = await _receive(session, tenant, sp.id, quantity="5", batch_number="B-FAR", expiry_days=300)
+
+    # 4 units: FEFO empties B-NEAR (3) then takes 1 from B-FAR.
+    data = await _create_sale(
+        client,
+        tenant,
+        {
+            "items": [{"storeProductId": str(sp.id), "quantity": "4"}],
+            "payments": [{"method": "cash", "amount": "40.00", "receivedAmount": "40.00"}],
+        },
+    )
+    returned = await client.post(
+        f"/sales/{data['id']}/returns",
+        json={"reason": "All four", "lines": [{"saleItemId": data["items"][0]["id"], "quantity": "4"}]},
+        headers=_return_headers(tenant, "two-batches"),
+    )
+    assert returned.status_code == 201, returned.text
+
+    restored: dict[Any, Decimal] = {}
+    for movement in await session.scalars(
+        select(InventoryMovement).where(InventoryMovement.reference_type == "sale_return")
+    ):
+        restored[movement.batch_id] = restored.get(movement.batch_id, Decimal(0)) + Decimal(movement.quantity)
+    assert restored == {first.id: Decimal("3"), second.id: Decimal("1")}
+
+
+async def test_a_double_tapped_return_refunds_once(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    """The same ``Idempotency-Key`` twice is one return, not two.
+
+    Returns had no key at all, so a double-tapped Refund button -- or the same
+    offline event replayed by the sync feed -- paid the customer twice and put the
+    stock back twice, and the second call was indistinguishable from a legitimate
+    second return.
+    """
+    sp = await _make_store_product(session, tenant)
+    await _receive(session, tenant, sp.id, quantity="10")
+    data = await _create_sale(client, tenant, _sale_body([sp.id]))
+    body = {
+        "reason": "Double tap",
+        "lines": [{"saleItemId": data["items"][0]["id"], "quantity": "1"}],
+    }
+    headers = _return_headers(tenant, "double-tap")
+
+    first = await client.post(f"/sales/{data['id']}/returns", json=body, headers=headers)
+    second = await client.post(f"/sales/{data['id']}/returns", json=body, headers=headers)
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    # The replay serves the stored body, so the caller cannot tell -- and must not
+    # be able to tell -- that its retry did nothing.
+    assert second.json()["data"] == first.json()["data"]
+
+    returns = list(await session.scalars(select(SaleReturn)))
+    assert len(returns) == 1
+    refunds = list(await session.scalars(select(PaymentRefund)))
+    assert sum(Decimal(refund.amount) for refund in refunds) == Decimal("10.00")
+    session.expunge_all()
+    balance = await session.scalar(select(InventoryBalance))
+    assert Decimal(balance.on_hand) == Decimal("9")  # 10 - 2 sold + 1 returned, once
+
+
+async def test_a_return_is_published_to_the_outbox(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    """A return moves revenue and stock, so it has to reach the same consumers.
+
+    ``sale.created`` and ``sale.voided`` both publish; the return did not, which
+    made the commonest correction the one that never left the database and let a
+    branch's figures drift by every refund it took.
+    """
+    sp = await _make_store_product(session, tenant)
+    await _receive(session, tenant, sp.id, quantity="10")
+    data = await _create_sale(client, tenant, _sale_body([sp.id]))
+    returned = await client.post(
+        f"/sales/{data['id']}/returns",
+        json={"reason": "Damaged", "lines": [{"saleItemId": data["items"][0]["id"], "quantity": "1"}]},
+        headers=_return_headers(tenant, "outbox"),
+    )
+    assert returned.status_code == 201, returned.text
+
+    events = {
+        event.event_type: event
+        for event in await session.scalars(select(OutboxEvent))
+    }
+    assert "sale.returned" in events, "a return must be published like a sale or a void"
+    payload = events["sale.returned"].payload
+    # ``store_id`` travels with the event for the same reason it does on a void: a
+    # correction that cannot be routed to a branch cannot correct that branch.
+    assert payload["sale_id"] == data["id"]
+    assert payload["store_id"] == str(tenant["store"].id)
+    assert payload["total"] == "-10.00"
 
 
 async def test_void_on_due_sale_clears_the_debt(

@@ -3,12 +3,23 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Button, Pressable, ScrollView, Text, View } from 'react-native';
 
 import { pharmacyApi } from '../../src/lib/api';
+import { RequireCapability } from '../../src/lib/guard';
 import { flushQueue, forgetSale, queueStatus, recoverOutbox, type SaleQueueStatus } from '../../src/lib/offlineSales';
 import { useSession } from '../../src/lib/session';
 
 const empty: SaleQueueStatus = { pending: 0, retrying: 0, stuck: [], nextRetryAt: null };
 
+// Gated with the counter, not separately: this screen reports on the till's own
+// outbox, so a role that cannot ring up a sale has nothing to read here.
 export default function SyncScreen(): ReactNode {
+  return (
+    <RequireCapability capability="sales.create">
+      <SyncStatus />
+    </RequireCapability>
+  );
+}
+
+function SyncStatus(): ReactNode {
   const { user, signOut } = useSession();
   const [status, setStatus] = useState<SaleQueueStatus>(empty);
   const [busy, setBusy] = useState(false);

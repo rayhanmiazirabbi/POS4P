@@ -93,6 +93,9 @@ importers:
       '@pharmacy/money':
         specifier: workspace:*
         version: link:../../packages/money
+      '@pharmacy/permissions':
+        specifier: workspace:*
+        version: link:../../packages/permissions
       '@pharmacy/sales':
         specifier: workspace:*
         version: link:../../packages/sales

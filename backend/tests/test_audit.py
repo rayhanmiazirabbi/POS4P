@@ -191,7 +191,7 @@ async def test_tampered_row_is_detected_by_verification(
         user_id=tenant["owner"].id,
         role=Role.OWNER,
     )
-    record_audit(
+    entry = record_audit(
         session,
         context,
         action="test.tamperme",
@@ -208,7 +208,7 @@ async def test_tampered_row_is_detected_by_verification(
         .values(action="test.innocent")
     )
     await session.commit()
-    await session.expire_all()
+    await session.refresh(entry)
 
     report = await client.get("/audit/logs/verify", headers=_headers(tenant))
     tampered = report.json()["data"]["tampered"]

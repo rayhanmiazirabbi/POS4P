@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.context import RequestContext
 from app.domains.inventory import (
-    InventoryBatch,
     InventoryMovement,
     InventoryMovementType,
 )
@@ -51,6 +50,14 @@ class SaleCreated:
     items: list[SaleItem] = field(default_factory=list)
     payments: list[Any] = field(default_factory=list)
     #: Set when an idempotent replay served a stored response body instead.
+    replay_body: dict[str, Any] | None = None
+
+
+@dataclass
+class SaleReturnCreated:
+    #: ``None`` on a replay: the row belongs to the first call's transaction, and
+    #: reloading it would only re-derive what ``replay_body`` already holds.
+    sale_return: SaleReturn | None = None
     replay_body: dict[str, Any] | None = None
 
 
@@ -112,6 +119,37 @@ def compute_totals(lines: list[tuple[Decimal, Decimal]], discount: Decimal) -> t
     if total < 0:
         raise ValidationError("Discount cannot exceed the sale subtotal")
     return subtotal, discount, total
+
+
+def allocate_discount(line_totals: list[Decimal], discount: Decimal) -> list[Decimal]:
+    """Split a sale-level discount across lines in proportion to their line totals.
+
+    Largest remainder on integer cents, so the parts sum to exactly ``discount``
+    and no line absorbs a rounding ghost. This mirrors ``allocateLineDiscounts``
+    in ``@pharmacy/sales``, which the clients already use to print the same split
+    on a receipt.
+
+    The discount only ever lives on ``sales.discount`` -- ``sale_items`` has no
+    discount column -- so anything that needs to know what a *line* was actually
+    worth has to re-derive it here. A refund is the case that matters: paying back
+    the undiscounted ``unit_price`` hands over money the till never took.
+    """
+    cents = [int(Decimal(value).quantize(CENT) * 100) for value in line_totals]
+    target = int(Decimal(discount).quantize(CENT) * 100)
+    subtotal = sum(cents)
+    if target <= 0 or subtotal <= 0:
+        return [Decimal(0) for _ in line_totals]
+    shares = [value * target // subtotal for value in cents]
+    # Largest fractional part first, then earliest line, so one sale always splits
+    # the same way however often it is recomputed.
+    order = sorted(
+        range(len(cents)),
+        key=lambda index: (-((cents[index] * target) % subtotal), index),
+    )
+    for index in order[: target - sum(shares)]:
+        shares[index] += 1
+    return [(Decimal(share) / 100).quantize(CENT) for share in shares]
+
 
 
 async def create_sale(
@@ -295,32 +333,120 @@ async def _consume(
     )
 
 
+async def _sold_batches(
+    session: AsyncSession, sale_id: UUID
+) -> dict[UUID, dict[UUID, Decimal]]:
+    """Units taken per store product and batch, read off the sale's own allocations.
+
+    Ordered by allocation id, which is the order FEFO picked the batches at the
+    time of sale, so a partial return puts stock back the way it came out.
+    """
+    rows = await session.execute(
+        select(
+            SaleItem.store_product_id,
+            SaleItemBatchAllocation.batch_id,
+            SaleItemBatchAllocation.quantity,
+        )
+        .join(SaleItem, SaleItem.id == SaleItemBatchAllocation.sale_item_id)
+        .where(SaleItem.sale_id == sale_id)
+        .order_by(SaleItemBatchAllocation.id)
+    )
+    sold: dict[UUID, dict[UUID, Decimal]] = {}
+    for store_product_id, batch_id, quantity in rows:
+        per_batch = sold.setdefault(store_product_id, {})
+        per_batch[batch_id] = per_batch.get(batch_id, Decimal(0)) + Decimal(quantity)
+    return sold
+
+
+def _restored_batches(
+    movements: list[InventoryMovement],
+) -> dict[UUID, dict[UUID, Decimal]]:
+    """What prior returns already put back, per store product and batch."""
+    restored: dict[UUID, dict[UUID, Decimal]] = {}
+    for movement in movements:
+        if movement.batch_id is None:
+            continue
+        per_batch = restored.setdefault(movement.store_product_id, {})
+        per_batch[movement.batch_id] = per_batch.get(
+            movement.batch_id, Decimal(0)
+        ) + abs(Decimal(movement.quantity))
+    return restored
+
+
+def _plan_restore(
+    requested: dict[UUID, Decimal],
+    sold_batches: dict[UUID, dict[UUID, Decimal]],
+    restored_batches: dict[UUID, dict[UUID, Decimal]],
+) -> dict[UUID, list[tuple[UUID, Decimal]]]:
+    """Assign each returned unit back to the batch the sale took it from.
+
+    Capacity per batch is what the sale took less what earlier returns already put
+    back, so the plan can always be satisfied: the caller has already capped the
+    request at the un-returned quantity, and that cap is the sum of these
+    capacities. The ``InsufficientStock`` below is therefore an invariant check,
+    not a business rule -- a return is a credit against movements that exist.
+    """
+    plan: dict[UUID, list[tuple[UUID, Decimal]]] = {}
+    for store_product_id, quantity in requested.items():
+        remaining = Decimal(quantity)
+        already = restored_batches.get(store_product_id, {})
+        assignments: list[tuple[UUID, Decimal]] = []
+        for batch_id, sold_quantity in sold_batches.get(store_product_id, {}).items():
+            if remaining <= 0:
+                break
+            capacity = sold_quantity - already.get(batch_id, Decimal(0))
+            if capacity <= 0:
+                continue
+            take = min(remaining, capacity)
+            assignments.append((batch_id, take))
+            remaining -= take
+        if remaining > 0:
+            raise InsufficientStock(
+                f"Sale allocations do not account for the returned quantity of "
+                f"store product '{store_product_id}'"
+            )
+        plan[store_product_id] = assignments
+    return plan
+
+
 async def _restore_stock(
     session: AsyncSession,
     context: RequestContext,
-    quantities: dict[UUID, Decimal],
+    plan: dict[UUID, list[tuple[UUID, Decimal]]],
     *,
     reference_type: str,
     reference_id: UUID,
 ) -> None:
-    """Return stock to shelves FEFO via positive RETURN movements."""
-    for store_product_id, quantity in quantities.items():
-        result = await allocate_fefo_for_product(session, context, store_product_id, quantity)
-        if not result.ok:
-            raise InsufficientStock(f"Insufficient stock to process the return")
+    """Put returned stock back into the batches it was sold from.
+
+    The batch comes from the sale's own ``sale_item_batch_allocations`` rows rather
+    than being chosen afresh. Re-running the FEFO *allocator* here was wrong twice
+    over. It only considers batches with stock still on the shelf and an expiry in
+    the future, so a sale that emptied the shelf -- or a batch that expired between
+    the sale and the return -- refused the refund outright, with no way to pay the
+    customer back at all. And when it did succeed the units could land in a
+    different batch than they left, which silently mis-stated gross profit, because
+    reports value returned stock at the receiving batch's ``unit_cost``.
+
+    A return needs no availability check: the units exist because the sale took
+    them. Restoring into a batch that has since expired is correct -- that is where
+    the stock physically is -- and expired batches stay out of future allocations,
+    so nothing resells them.
+    """
+    now = utc_now()
+    for store_product_id, assignments in plan.items():
         store_product = await session.get(StoreProduct, store_product_id)
         assert store_product is not None
-        now = utc_now()
-        for allocation in result.allocations:
-            batch = await session.get(InventoryBatch, allocation.batch_id)
+        restored = Decimal(0)
+        for batch_id, quantity in assignments:
             session.add(
                 InventoryMovement(
                     organization_id=store_product.organization_id,
                     store_id=store_product.store_id,
                     store_product_id=store_product_id,
-                    batch_id=allocation.batch_id,
+                    batch_id=batch_id,
                     movement_type=InventoryMovementType.RETURN,
-                    quantity=abs(allocation.quantity),
+                    quantity=quantity,
                     reference_type=reference_type,
                     reference_id=reference_id,
                     idempotency_key=str(uuid4()),
@@ -328,8 +454,9 @@ async def _restore_stock(
                     actor_user_id=context.user_id,
                 )
             )
-            assert batch is not None
-        await _apply_to_balance(session, store_product, quantity)
+            restored += quantity
+        await _apply_to_balance(session, store_product, restored)
+
 
 
 def _sold_quantities(items: list[SaleItem]) -> dict[UUID, Decimal]:
@@ -361,14 +488,85 @@ def _restored_quantities(
     return restored
 
 
+def _net_by_product(items: list[SaleItem], discount: Decimal) -> dict[UUID, Decimal]:
+    """What each store product was actually worth after the sale-level discount.
+
+    ``sales.discount`` is a single figure against the whole cart, so a line's own
+    share of it has to be re-derived; :func:`allocate_discount` does that the same
+    way the clients do when they print the receipt.
+    """
+    lines = [Decimal(item.line_total) for item in items]
+    net: dict[UUID, Decimal] = {}
+    for item, share in zip(items, allocate_discount(lines, discount)):
+        net[item.store_product_id] = (
+            net.get(item.store_product_id, Decimal(0)) + Decimal(item.line_total) - share
+        )
+    return net
+
+
+def _returned_value(net_total: Decimal, sold: Decimal, quantity: Decimal) -> Decimal:
+    """Value of ``quantity`` units when ``sold`` units were worth ``net_total``."""
+    if sold <= 0:
+        return Decimal(0)
+    return (net_total * quantity / sold).quantize(CENT)
+
+
+def _refund_amount(
+    net: dict[UUID, Decimal],
+    sold: dict[UUID, Decimal],
+    returned: dict[UUID, Decimal],
+    requested: dict[UUID, Decimal],
+) -> Decimal:
+    """Refund for this return: the discounted value of the units going back.
+
+    Priced off the *net* line value rather than ``sale_items.unit_price``. The
+    unit price is what the item was rung up at before the cart-level discount, so
+    refunding it handed back money the till never took -- a 100.00 cart sold for
+    80.00 refunded the full 100.00, and the shop paid 20.00 for the privilege of
+    accepting a return.
+
+    Each product's figure is the difference between the value of everything
+    returned so far and the value of everything returned before this one, so
+    successive partial returns of a product whose net value does not divide
+    evenly still add up to exactly that value -- no cent is paid twice or lost in
+    the last return.
+    """
+    total = Decimal(0)
+    for product_id, quantity in requested.items():
+        net_total = net.get(product_id, Decimal(0))
+        sold_quantity = sold.get(product_id, Decimal(0))
+        before = returned.get(product_id, Decimal(0))
+        total += _returned_value(net_total, sold_quantity, before + quantity) - _returned_value(
+            net_total, sold_quantity, before
+        )
+    return total.quantize(CENT)
+
+
+def sale_return_body(sale_return: SaleReturn) -> dict[str, Any]:
+    """Camel-case wire shape, used for responses and idempotency replays alike."""
+    import json
+
+    from app.schemas.sales import SaleReturnResponse
+
+    body = SaleReturnResponse(
+        id=sale_return.id,
+        sale_id=sale_return.sale_id,
+        reason=sale_return.reason,
+        total=Decimal(sale_return.total),
+        created_at=sale_return.created_at,
+    )
+    return json.loads(body.model_dump_json(by_alias=True))
+
+
 async def create_sale_return(
     session: AsyncSession,
     context: RequestContext,
     sale_id: UUID,
     payload,
     *,
+    idempotency_key: str,
     request_id: str,
-) -> SaleReturn:
+) -> SaleReturnCreated:
     """Return lines of a completed sale back into stock within sold limits.
 
     The cap is enforced per *store product*, not per sale line, because that is the
@@ -381,10 +579,22 @@ async def create_sale_return(
     back everything the customer bought.
 
     ``sale_item_id`` still names the line: it proves the line belongs to this sale
-    and supplies the unit price the refund is computed at.
+    and identifies the product being handed back.
+
+    Idempotent on ``idempotency_key``, like ``create_sale``. Without it a
+    double-tapped Refund button -- or the same offline event replayed by the sync
+    feed -- paid the customer twice and put the stock back twice, and the second
+    call looked like a legitimate second return because nothing tied it to the
+    first.
     """
     if context.role not in STAFF_ROLES:
         raise Forbidden("Only staff may create returns")
+
+    payload_dict = payload.model_dump(by_alias=True)
+    stored = await replay(session, context.organization_id, idempotency_key, payload_dict)
+    if stored is not None:
+        return SaleReturnCreated(sale_return=None, replay_body=stored)
+
     sale = await load_sale(session, context, sale_id)
     if sale.status is not SaleStatus.COMPLETED:
         raise Conflict("Only completed sales can be returned")
@@ -403,7 +613,6 @@ async def create_sale_return(
     returned = _restored_quantities(prior_movements)
 
     requested: dict[UUID, Decimal] = {}
-    refund_total = Decimal(0)
     for line in payload.lines:
         item = items.get(line.sale_item_id)
         if item is None:
@@ -413,14 +622,19 @@ async def create_sale_return(
         if sold[product_id] - already < Decimal(line.quantity):
             raise Conflict("Return quantity exceeds remaining returnable quantity")
         requested[product_id] = requested.get(product_id, Decimal(0)) + Decimal(line.quantity)
-        refund_total += Decimal(line.quantity) * Decimal(item.unit_price)
-    refund_total = refund_total.quantize(CENT)
+
+    refund_total = _refund_amount(
+        _net_by_product(item_rows, Decimal(sale.discount)), sold, returned, requested
+    )
 
     try:
+        plan = _plan_restore(
+            requested, await _sold_batches(session, sale.id), _restored_batches(prior_movements)
+        )
         await _restore_stock(
             session,
             context,
-            requested,
+            plan,
             reference_type="sale_return",
             reference_id=sale.id,
         )
@@ -435,11 +649,15 @@ async def create_sale_return(
         sale_id=sale.id,
         reason=payload.reason.strip(),
         total=(-refund_total).quantize(CENT),
-        idempotency_key=f"return:{uuid4()}",
+        idempotency_key=idempotency_key,
         created_at=now,
     )
     session.add(sale_return)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise Conflict("Return could not be created") from exc
 
     # The refund is booked against the tenders it came in on, which is what keeps
     # the customer's due balance and the day's payment mix derivable from the ledger.
@@ -450,6 +668,7 @@ async def create_sale_return(
         refund_total,
         reason=sale_return.reason,
         request_id=request_id,
+        key_prefix=f"return:{sale_return.id}",
     )
 
     record_audit(
@@ -461,8 +680,40 @@ async def create_sale_return(
         request_id=request_id,
         after={"return_id": str(sale_return.id), "refund_total": str(refund_total)},
     )
-    await session.commit()
-    return sale_return
+    # A return moves revenue and stock exactly as ``sale.created`` and
+    # ``sale.voided`` do, so it has to reach the same consumers. Without this the
+    # only correction that never left the database was the commonest one, and a
+    # branch's figures drifted by every refund it took.
+    enqueue_outbox(
+        session,
+        organization_id=context.organization_id,
+        event_type="sale.returned",
+        aggregate_type="sale",
+        aggregate_id=sale.id,
+        payload={
+            "sale_id": str(sale.id),
+            "store_id": str(sale.store_id),
+            "return_id": str(sale_return.id),
+            "total": str(sale_return.total),
+            "reason": sale_return.reason,
+        },
+    )
+
+    body = sale_return_body(sale_return)
+    remember(
+        session,
+        context.organization_id,
+        idempotency_key,
+        payload_dict,
+        response_status=201,
+        response_body=body,
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise Conflict("Return could not be created") from exc
+    return SaleReturnCreated(sale_return=sale_return, replay_body=None)
 
 
 async def void_sale(
@@ -513,8 +764,11 @@ async def void_sale(
     items = await _load_items(session, sale.id)
     quantities = _sold_quantities(items)
     try:
+        # Nothing has been restored yet: a sale with a return against it cannot be
+        # voided, which the check above has already enforced.
+        plan = _plan_restore(quantities, await _sold_batches(session, sale.id), {})
         await _restore_stock(
-            session, context, quantities, reference_type="void", reference_id=sale.id
+            session, context, plan, reference_type="void", reference_id=sale.id
         )
     except InsufficientStock as exc:
         await session.rollback()
@@ -532,6 +786,7 @@ async def void_sale(
         Decimal(sale.total),
         reason=f"void: {sale.void_reason}",
         request_id=request_id,
+        key_prefix=f"void:{sale.id}",
     )
 
     record_audit(

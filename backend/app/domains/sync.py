@@ -88,15 +88,32 @@ class SyncFeedItem(StoreScopedMixin, UUIDPrimaryKeyMixin, Base):
     """An applied change projected into the per-store pull feed.
 
     Rows come from either an offline device event (``device_id``/``sync_event_id``
-    set) or the server-side outbox (both null); the feed stays gap-free by
-    server sequence either way.
+    set) or the server-side outbox (``outbox_event_id`` set); the feed stays
+    gap-free by server sequence either way.
+
+    Exactly one of those two source columns is set, and each is unique, so a
+    change can reach the feed only once no matter how often its producer runs.
+    Both are nullable, and a unique constraint ignores NULLs in PostgreSQL and
+    SQLite alike, so the two kinds of row do not constrain each other.
     """
 
     __tablename__ = "sync_feed_items"
-    __table_args__ = (UniqueConstraint("store_id", "server_sequence"),)
+    __table_args__ = (
+        UniqueConstraint("store_id", "server_sequence"),
+        # One feed row per ingested event. Ingest re-runs an event whose row says
+        # ``applied=False`` -- a crash between the handler's commit and this write
+        # leaves exactly that -- and two retries racing each other both took the
+        # re-run path and both wrote a row, so every terminal in the shop pulled
+        # the same sale twice.
+        UniqueConstraint("sync_event_id", name="uq_sync_feed_items_sync_event_id"),
+        # One feed row per outbox event, for the same reason on the pull side: two
+        # devices pulling at once both read the same unpublished rows.
+        UniqueConstraint("outbox_event_id", name="uq_sync_feed_items_outbox_event_id"),
+    )
 
     device_id: Mapped[UUID | None] = mapped_column(ForeignKey("devices.id"))
     sync_event_id: Mapped[UUID | None] = mapped_column(ForeignKey("sync_events.id"))
+    outbox_event_id: Mapped[UUID | None] = mapped_column(ForeignKey("outbox_events.id"))
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

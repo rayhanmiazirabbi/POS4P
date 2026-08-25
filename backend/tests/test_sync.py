@@ -923,3 +923,196 @@ async def test_revoke_reason_reaches_the_audit_log(
         select(AuditLog).where(AuditLog.action == "sync.device.revoked")
     )
     assert entry.after_data["reason"] == "Terminal stolen from the counter"
+
+
+# --- one feed row per change ---------------------------------------------------------
+#
+# Both duplicates below are races, and the test database cannot stage a race: it is
+# ``sqlite+aiosqlite:///:memory:``, which serialises writers, so two overlapping
+# requests are impossible here by construction. That is exactly why these bugs
+# survived a passing suite. What *is* testable -- and what actually makes the fix
+# hold in production -- is the constraint that turns a duplicate into an error
+# instead of a second row, so that is what these assert.
+
+
+async def test_the_feed_cannot_hold_one_ingested_event_twice(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    """One ``sync_events`` row means at most one feed row.
+
+    Ingest re-runs an event whose row still reads ``applied=False``, because a
+    crash between a handler's own commit and the feed write leaves exactly that
+    state and the change would otherwise be stranded. Two retries racing each
+    other both took the re-run path, and nothing stopped either from writing a
+    feed row -- ``(store_id, server_sequence)`` was unique but they held different
+    sequences. Every terminal in the shop then pulled that sale twice.
+    """
+    from sqlalchemy import func, select
+    from sqlalchemy.exc import IntegrityError
+
+    from app.domains.sync import SyncEvent
+
+    device = await _make_device(session, tenant, key="feed-once-1")
+    store_product = await _sellable(session, tenant, sku="SKU-FEED1")
+
+    response = await _ingest(client, tenant, [_sale_envelope(1, store_product.id)], device)
+    assert response.status_code == 200, response.text
+    ack = response.json()["data"]["acks"][0]
+    assert ack["duplicate"] is False
+
+    session.expunge_all()
+    sync_event = await session.scalar(select(SyncEvent))
+    rows = await session.scalar(
+        select(func.count()).select_from(SyncFeedItem).where(
+            SyncFeedItem.sync_event_id == sync_event.id
+        )
+    )
+    assert int(rows or 0) == 1
+
+    session.add(
+        SyncFeedItem(
+            organization_id=tenant["organization"].id,
+            store_id=tenant["store"].id,
+            device_id=device.id,
+            sync_event_id=sync_event.id,
+            event_type="sale.create",
+            payload={"total": "20.00"},
+            received_at=utc_now(),
+            server_sequence=9999,
+        )
+    )
+    try:
+        await session.flush()
+    except IntegrityError:
+        pass
+    else:  # pragma: no cover - only reached if the constraint is missing
+        raise AssertionError("a second feed row for one event must not be writable")
+    await session.rollback()
+
+
+async def test_the_feed_cannot_hold_one_outbox_event_twice(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    """One ``outbox_events`` row means at most one feed row.
+
+    A pull publishes whatever is unpublished, so two devices pulling at once both
+    read the same set. The row lock inside ``_next_server_sequence`` made the
+    second wait, but it woke holding objects read before the first commit and went
+    on to write its own feed item and stamp ``published_at`` again -- so both tills
+    showed the same online sale twice, under two different sequences.
+    """
+    from sqlalchemy import func, select
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import OutboxEvent
+
+    device = await _make_device(session, tenant, key="feed-once-2")
+    store_product = await _sellable(session, tenant, sku="SKU-FEED2", quantity="5")
+    await session.commit()
+
+    sale = await client.post(
+        "/sales",
+        json={
+            "items": [{"storeProductId": str(store_product.id), "quantity": "1"}],
+            "payments": [{"method": "cash", "amount": "10.00", "receivedAmount": "10.00"}],
+        },
+        headers={**_headers(tenant), "Idempotency-Key": "feed-once-sale-0001"},
+    )
+    assert sale.status_code == 201, sale.text
+
+    pulled = await client.get(
+        "/sync/events?cursor=0", headers=_headers(tenant, device_id=device.id)
+    )
+    assert pulled.status_code == 200, pulled.text
+
+    session.expunge_all()
+    outbox = await session.scalar(
+        select(OutboxEvent).where(OutboxEvent.event_type == "sale.created")
+    )
+    assert outbox.published_at is not None, "the pull must have published it"
+    rows = await session.scalar(
+        select(func.count()).select_from(SyncFeedItem).where(
+            SyncFeedItem.outbox_event_id == outbox.id
+        )
+    )
+    assert int(rows or 0) == 1
+
+    session.add(
+        SyncFeedItem(
+            organization_id=tenant["organization"].id,
+            store_id=tenant["store"].id,
+            device_id=None,
+            sync_event_id=None,
+            outbox_event_id=outbox.id,
+            event_type=outbox.event_type,
+            payload=outbox.payload,
+            received_at=utc_now(),
+            server_sequence=9999,
+        )
+    )
+    try:
+        await session.flush()
+    except IntegrityError:
+        pass
+    else:  # pragma: no cover - only reached if the constraint is missing
+        raise AssertionError("a second feed row for one outbox event must not be writable")
+    await session.rollback()
+
+
+async def test_an_unfinished_event_is_retried_into_exactly_one_feed_row(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    """A crash before the feed write is recovered, and recovered only once.
+
+    An ``applied=False`` row with no feed item is what a crash between a handler's
+    own commit and the feed write leaves behind, so ingest must finish it rather
+    than acknowledge it as done. Retried twice -- the device does not know which
+    attempt the server saw -- it must still land one feed row and one sale.
+    """
+    from decimal import Decimal
+    from sqlalchemy import func, select
+
+    from app.domains.sales import Sale
+    from app.domains.sync import SyncEvent
+
+    device = await _make_device(session, tenant, key="unfinished-1")
+    store_product = await _sellable(session, tenant, sku="SKU-UNFIN")
+
+    envelope = _sale_envelope(1, store_product.id)
+    session.add(
+        SyncEvent(
+            organization_id=tenant["organization"].id,
+            store_id=tenant["store"].id,
+            device_id=device.id,
+            event_id=UUID(envelope["eventId"]),
+            event_type=envelope["eventType"],
+            client_sequence=envelope["clientSequence"],
+            received_at=utc_now(),
+            applied=False,
+        )
+    )
+    await session.commit()
+
+    first = await _ingest(client, tenant, [envelope], device)
+    second = await _ingest(client, tenant, [envelope], device)
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["data"]["acks"][0]["duplicate"] is False
+    assert second.json()["data"]["acks"][0]["duplicate"] is True
+    # The retry has to learn the sequence, or the device can never advance its cursor.
+    assert (
+        second.json()["data"]["acks"][0]["serverSequence"]
+        == first.json()["data"]["acks"][0]["serverSequence"]
+    )
+
+    session.expunge_all()
+    sync_event = await session.scalar(select(SyncEvent))
+    assert sync_event.applied is True
+    feed_rows = await session.scalar(
+        select(func.count()).select_from(SyncFeedItem).where(
+            SyncFeedItem.sync_event_id == sync_event.id
+        )
+    )
+    assert int(feed_rows or 0) == 1
+    sales = list(await session.scalars(select(Sale)))
+    assert len(sales) == 1 and Decimal(sales[0].total) == Decimal("20.00")

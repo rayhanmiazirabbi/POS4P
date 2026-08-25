@@ -130,15 +130,22 @@ export type TenderSplit = {
  */
 export function splitTender(totalAmount: string, cashRaw: string, digitalRaw: string): TenderSplit {
   const total = money(totalAmount);
-  const cash = cashRaw.trim() === '' ? total : readTender(cashRaw);
   const digital = digitalRaw.trim() === '' ? ZERO : readTender(digitalRaw);
-
   const digitalApplied = digital === null ? ZERO : minMoney(digital, total);
-  const cashApplied = cash === null ? ZERO : minMoney(cash, subtract(total, digitalApplied));
+
+  // An untouched cash box means "the exact amount still owed", so it is imputed
+  // from the balance left after the digital tender rather than from the whole
+  // total. Imputing the total made a digital-only sale -- the cashier never
+  // touched the cash box -- report the entire sale value as change, so the
+  // screen told the counter to hand back money the drawer had not taken.
+  const owed = subtract(total, digitalApplied);
+  const cash = cashRaw.trim() === '' ? owed : readTender(cashRaw);
+
+  const cashApplied = cash === null ? ZERO : minMoney(cash, owed);
   return {
     cash: cashApplied.amount,
     digital: digitalApplied.amount,
-    due: subtract(subtract(total, cashApplied), digitalApplied).amount,
+    due: subtract(owed, cashApplied).amount,
     // Non-negative by construction: `cashApplied` is capped at what was tendered,
     // so the difference is the overpayment or nothing.
     change: cash === null ? ZERO.amount : subtract(cash, cashApplied).amount,

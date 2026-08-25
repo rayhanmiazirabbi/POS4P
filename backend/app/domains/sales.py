@@ -66,6 +66,7 @@ class SaleItemBatchAllocation(UUIDPrimaryKeyMixin, Base):
 
 class SaleReturn(UUIDPrimaryKeyMixin, StoreScopedMixin, Base):
     __tablename__ = "sale_returns"
+    __table_args__ = (UniqueConstraint("organization_id", "idempotency_key"),)
 
     sale_id: Mapped[UUID] = mapped_column(ForeignKey("sales.id"), nullable=False)
     reason: Mapped[str] = mapped_column(String(240), nullable=False)

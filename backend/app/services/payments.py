@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,6 +75,7 @@ async def refund_payments(
     *,
     reason: str,
     request_id: str,
+    key_prefix: str,
 ) -> list[PaymentRefund]:
     """Refund ``amount`` across a sale's tenders, writing one ledger row each.
 
@@ -86,6 +87,12 @@ async def refund_payments(
 
     ``due`` rows also write the balance down, because that is the same money: the
     debt is cancelled instead of cash being handed over.
+
+    ``key_prefix`` names the correction being paid back (``return:<id>`` or
+    ``void:<id>``), which makes each refund row's key a function of its cause
+    rather than a fresh UUID. A random key made the unique constraint on
+    ``payment_refunds`` unenforceable: two refunds of the same money looked like
+    two different refunds, so a retry that got past the caller wrote both.
     """
     remaining = Decimal(amount).quantize(CENT)
     if remaining <= 0:
@@ -109,7 +116,7 @@ async def refund_payments(
                 store_id=payment.store_id,
                 payment_id=payment.id,
                 amount=take,
-                idempotency_key=f"refund:{payment.id}:{uuid4()}",
+                idempotency_key=f"{key_prefix}:{payment.id}",
                 created_at=now,
             )
             session.add(refund)
@@ -122,6 +129,19 @@ async def refund_payments(
                     customer.due_balance = max(
                         Decimal(customer.due_balance) - take, Decimal(0)
                     ).quantize(CENT)
+
+    if remaining > 0:
+        # The tenders could not absorb the whole refund, so the customer is owed
+        # money this ledger has no row for. Silently returning the short amount
+        # was worse than failing: the caller went on to commit a return whose
+        # ``total`` claimed a refund larger than the sum of its refund rows, so
+        # the sale's own books disagreed about what was paid back and no report
+        # could tell which figure was right. A refund that cannot be booked in
+        # full is a conflict for a human to resolve.
+        raise Conflict(
+            f"Refund of {Decimal(amount).quantize(CENT)} exceeds the refundable "
+            f"balance of this sale's tenders by {remaining}"
+        )
 
     if refunds:
         await session.flush()

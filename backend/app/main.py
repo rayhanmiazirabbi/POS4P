@@ -3,7 +3,9 @@ from __future__ import annotations
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import get_settings
 from app.errors import register_exception_handlers
 from app.routers import (
     ai_router,
@@ -32,6 +34,18 @@ from app.routers import (
 )
 
 app = FastAPI(title="Pharmacy Platform API", version="0.1.0")
+
+# Browsers call the API from a different origin than the shells are served from;
+# without this the preflight fails and every request shows up as "Failed to fetch".
+settings = get_settings()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+)
 
 
 @app.middleware("http")

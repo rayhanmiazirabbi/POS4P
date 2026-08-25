@@ -469,6 +469,7 @@ export type SalesClient = {
   read(saleId: string, options?: RequestOptions): Promise<ApiResponse<Sale>>;
   /** Requires an idempotency key (send one via `options.idempotencyKey`). */
   create(body: SaleCreateRequest, options?: RequestOptions): Promise<ApiResponse<Sale>>;
+  /** Requires an idempotency key (send one via `options.idempotencyKey`). */
   createReturn(saleId: string, body: SaleReturnRequest, options?: RequestOptions): Promise<ApiResponse<{ id: string; saleId: string; reason: string; total: string; createdAt: string }>>;
   void(saleId: string, body: { reason: string }, options?: RequestOptions): Promise<ApiResponse<Sale>>;
 };
@@ -755,18 +756,21 @@ export function createProductsClient(client: ApiClient): ProductsClient {
 }
 
 export type InventoryClient = {
-  stock(options?: RequestOptions): Promise<ApiResponse<readonly StockRow[]>>;
-  expiring(withinDays?: number, options?: RequestOptions): Promise<ApiResponse<readonly ExpiringBatch[]>>;
+  /** `storeId` is required by the endpoint; the token's branch is not assumed. */
+  stock(storeId: string, options?: RequestOptions): Promise<ApiResponse<readonly StockRow[]>>;
+  expiring(storeId: string, withinDays?: number, options?: RequestOptions): Promise<ApiResponse<readonly ExpiringBatch[]>>;
   /** Requires an idempotency key (send one via `options.idempotencyKey`). */
   receiveBatch(body: ReceiveBatchRequest, options?: RequestOptions): Promise<ApiResponse<unknown>>;
 };
 
 export function createInventoryClient(client: ApiClient): InventoryClient {
   return {
-    stock: (options = {}) => client.request<readonly StockRow[]>('/inventory/stock', { method: 'GET' }, { ...options, query: { ...options.query } }),
-    expiring: (withinDays = 30, options = {}) =>
-      client.get<readonly ExpiringBatch[]>('/inventory/expiring', { ...options, query: { ...options.query, withinDays } }),
-    receiveBatch: (body, options = {}) => client.post<unknown>('/inventory/batches', body, options),
+    stock: (storeId, options = {}) => client.request<readonly StockRow[]>('/inventory/stock', { method: 'GET' }, { ...options, query: { ...options.query, storeId } }),
+    expiring: (storeId, withinDays = 30, options = {}) =>
+      client.get<readonly ExpiringBatch[]>('/inventory/expiring', { ...options, query: { ...options.query, storeId, withinDays } }),
+    // `/inventory/receive`, not `/inventory/batches`: the latter has never existed,
+    // so every receive from the web app was a 404.
+    receiveBatch: (body, options = {}) => client.post<unknown>('/inventory/receive', body, options),
   };
 }
 

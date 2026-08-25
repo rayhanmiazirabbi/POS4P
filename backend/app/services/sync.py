@@ -455,6 +455,18 @@ async def _ingest_one(
     )
     if sync_event is None:  # pragma: no cover - the handler cannot delete its own event
         raise Conflict("Sync event vanished mid-ingest")
+    # Re-checked *after* the handler, not only before it. The pre-handler check ran
+    # before this event's bookkeeping was committed, so a concurrent retry of the
+    # same event -- two uploads of one queue, or a client that retried a request
+    # whose response it never saw -- could pass it twice and both go on to write a
+    # feed row. The handler is idempotent, so the sale itself was safe; the feed was
+    # not, and every terminal in the shop pulled that sale twice.
+    if sync_event.applied:
+        return SyncAck(
+            event_id=event_id,
+            server_sequence=await _feed_sequence_for(session, organization_id, event_id),
+            duplicate=True,
+        )
     checkpoint = await _checkpoint(session, organization_id, store_id, device_id)
 
     server_sequence = await _next_server_sequence(session, store_id)
@@ -477,7 +489,18 @@ async def _ingest_one(
     )
     # Committed before the next envelope is touched: a later failure must not be able
     # to roll back an effect that is already durable.
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        # The unique constraint on ``sync_event_id`` is the backstop for the race the
+        # check above narrows but cannot close: the winner's row is already in the
+        # feed and says the same thing, so this is a duplicate, not a failure.
+        await session.rollback()
+        return SyncAck(
+            event_id=event_id,
+            server_sequence=await _feed_sequence_for(session, organization_id, event_id),
+            duplicate=True,
+        )
     return SyncAck(event_id=event_id, server_sequence=server_sequence, duplicate=False)
 
 
@@ -487,17 +510,31 @@ async def _publish_pending_outbox(
     """Project unpublished outbox events for this store into the pull feed.
 
     This is the sync side of the outbox integration: server-side mutations
-    (online sales, voids) get a server sequence here so devices pull them with
-    the same gap-free ordering as replayed offline events.
+    (online sales, voids, returns) get a server sequence here so devices pull
+    them with the same gap-free ordering as replayed offline events.
+
+    Two devices pulling at once used to publish the same rows twice. Both read
+    the same unpublished set, and while the row lock inside
+    ``_next_server_sequence`` made the second wait, it woke holding ORM objects
+    from before the first commit -- so it wrote a second feed item and stamped
+    ``published_at`` again. The shop then saw every online sale twice on both
+    terminals.
+
+    ``skip_locked`` is the fix in PostgreSQL: a row another pull is publishing is
+    left to that pull, which is safe because it is being published either way.
+    SQLite renders no locking clause at all, so ``outbox_event_id`` being unique
+    is what keeps the guarantee everywhere.
     """
     from app.models import OutboxEvent
 
     rows = list(
         await session.scalars(
-            select(OutboxEvent).where(
+            select(OutboxEvent)
+            .where(
                 OutboxEvent.organization_id == context.organization_id,
                 OutboxEvent.published_at.is_(None),
             )
+            .with_for_update(skip_locked=True)
         )
     )
     published = False
@@ -511,6 +548,7 @@ async def _publish_pending_outbox(
                 store_id=store_id,
                 device_id=None,
                 sync_event_id=None,
+                outbox_event_id=row.id,
                 event_type=row.event_type,
                 payload=row.payload,
                 received_at=row.created_at,
@@ -520,7 +558,13 @@ async def _publish_pending_outbox(
         row.published_at = utc_now()
         published = True
     if published:
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Another pull got there first. Its rows are in the feed with their own
+            # sequences, and the SELECT below reads the committed feed, so dropping
+            # this attempt loses nothing -- publishing it twice would have.
+            await session.rollback()
 
 
 async def pull_changes(

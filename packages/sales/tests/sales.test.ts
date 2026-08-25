@@ -111,6 +111,34 @@ describe('splitTender', () => {
     });
   });
 
+  it('reports no change when a digital tender covers the total and the cash box is untouched', () => {
+    // A blank cash box means "the exact amount still owed", which on a
+    // digital-only sale is nothing. Imputing the whole total instead put the
+    // entire sale value on the change line, so the screen told the cashier to
+    // hand back money that had never entered the drawer.
+    expect(splitTender('100.00', '', '100.00')).toEqual({
+      cash: '0.00', digital: '100.00', due: '0.00', change: '0.00', readable: true,
+    });
+    // Same when the digital amount overshoots and is clamped back to the total.
+    expect(splitTender('100.00', '', '150.00')).toEqual({
+      cash: '0.00', digital: '100.00', due: '0.00', change: '0.00', readable: true,
+    });
+  });
+
+  it('lets an untouched cash box settle the balance a partial digital tender left', () => {
+    expect(splitTender('100.00', '', '40.00')).toEqual({
+      cash: '60.00', digital: '40.00', due: '0.00', change: '0.00', readable: true,
+    });
+  });
+
+  it('still returns change on cash typed over a total the digital tender then covered', () => {
+    // The cashier took a note and the customer then paid digitally: the note goes
+    // straight back, so no cash row is written but the change is real.
+    expect(splitTender('100.00', '50.00', '100.00')).toEqual({
+      cash: '0.00', digital: '100.00', due: '0.00', change: '50.00', readable: true,
+    });
+  });
+
   it('blocks the sale when either field is unreadable', () => {
     for (const bad of ['abc', '1,200', '-5', '1e3', '12.']) {
       expect(splitTender('100.00', bad, '').readable, `cash ${bad}`).toBe(false);

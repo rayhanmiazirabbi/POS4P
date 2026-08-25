@@ -218,3 +218,28 @@ describe('createDeviceIdentity', () => {
     expect(deviceKey.length).toBeGreaterThanOrEqual(8);
   });
 });
+
+describe('InventoryClient', () => {
+  it('posts a received batch to the route that exists', async () => {
+    // `/inventory/batches` was never a route, so every receive from the web app
+    // came back 404. The backend has only ever exposed `POST /inventory/receive`.
+    const { transport, calls } = capturingTransport(() => ({ data: undefined, requestId: 'request-1' }));
+    const api = createPharmacyApi(new ApiClient(transport, createMemoryStorage()));
+    await api.inventory.receiveBatch(
+      { storeProductId: 'sp-1', batchNumber: 'B-1', unitCost: '10.00', quantity: '5' },
+      { idempotencyKey: 'receive-1234567890' },
+    );
+    expect(calls[0]?.path).toBe('/inventory/receive');
+  });
+
+  it('sends the storeId both endpoints require', async () => {
+    // Both are `Query(alias="storeId")` with no default server-side, so omitting
+    // it type-checked and then 422'd.
+    const { transport, calls } = capturingTransport(() => ({ data: [], requestId: 'request-1' }));
+    const api = createPharmacyApi(new ApiClient(transport, createMemoryStorage()));
+    await api.inventory.stock('store-1');
+    await api.inventory.expiring('store-1', 14);
+    expect(calls[0]?.path).toBe('/inventory/stock?storeId=store-1');
+    expect(calls[1]?.path).toBe('/inventory/expiring?storeId=store-1&withinDays=14');
+  });
+});

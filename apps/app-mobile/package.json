@@ -11,6 +11,7 @@
     "@pharmacy/core": "workspace:*",
     "@pharmacy/design-tokens": "workspace:*",
     "@pharmacy/money": "workspace:*",
+    "@pharmacy/permissions": "workspace:*",
     "@pharmacy/sales": "workspace:*",
     "@pharmacy/sync": "workspace:*",
     "@pharmacy/types": "workspace:*",

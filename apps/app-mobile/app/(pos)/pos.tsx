@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type Rea
 import { ActivityIndicator, Button, FlatList, Pressable, Share, Text, TextInput, View } from 'react-native';
 
 import { pharmacyApi } from '../../src/lib/api';
+import { RequireCapability } from '../../src/lib/guard';
 import { envelopeContext, newIdempotencyKey, queueSale, queueStatus, recoverOutbox } from '../../src/lib/offlineSales';
 import { CameraView, nativeScanner, scannerFormats, type ScannerPermission } from '../../src/platform';
 import { useSession } from '../../src/lib/session';
@@ -27,6 +28,14 @@ import { useBackgroundSync } from '../../src/lib/useBackgroundSync';
 type CartLine = { storeProductId: string; sku: string; name: string; quantity: number; unitPrice: string };
 
 export default function PosScreen(): ReactNode {
+  return (
+    <RequireCapability capability="sales.create">
+      <PosCounter />
+    </RequireCapability>
+  );
+}
+
+function PosCounter(): ReactNode {
   const { user } = useSession();
   const [stale, setStale] = useState<string | null>(null);
   const [query, setQuery] = useState('');

@@ -10,6 +10,7 @@ dependencies = [
   "alembic>=1.14,<2",
   "argon2-cffi>=23.1,<24",
   "uuid6>=2024.7.10,<2026",
+  "uvicorn>=0.52.4",
 ]
 
 [project.optional-dependencies]

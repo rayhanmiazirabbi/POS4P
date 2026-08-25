@@ -112,9 +112,18 @@ async def create_return(
     session: SessionDep,
     context: StaffRolesDep,
     request_id: RequestIdDep,
+    idempotency_key: IdempotentDep,
 ) -> Envelope[SaleReturnResponse]:
-    sale_return = await service.create_sale_return(session, context, sale_id, payload, request_id=request_id)
-    return Envelope(data=SaleReturnResponse.model_validate(sale_return), request_id=request_id)
+    result = await service.create_sale_return(
+        session, context, sale_id, payload, idempotency_key=idempotency_key, request_id=request_id
+    )
+    if result.replay_body is not None:
+        return Envelope(
+            data=SaleReturnResponse.model_validate(result.replay_body), request_id=request_id
+        )
+    return Envelope(
+        data=SaleReturnResponse.model_validate(result.sale_return), request_id=request_id
+    )
 
 
 @router.post(

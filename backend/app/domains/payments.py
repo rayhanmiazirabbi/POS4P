@@ -49,6 +49,7 @@ class Payment(StoreScopedMixin, UUIDPrimaryKeyMixin, Base):
 
 class PaymentRefund(AppendOnlyMixin, StoreScopedMixin, UUIDPrimaryKeyMixin, Base):
     __tablename__ = "payment_refunds"
+    __table_args__ = (UniqueConstraint("organization_id", "idempotency_key"),)
 
     payment_id: Mapped[UUID] = mapped_column(ForeignKey("payments.id"), nullable=False)
     amount: Mapped[Decimal] = mapped_column(money_column(), nullable=False)

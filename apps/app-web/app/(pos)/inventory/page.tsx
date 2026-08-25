@@ -49,7 +49,7 @@ export default function InventoryPage(): ReactNode {
   const stockQuery = useQuery({
     queryKey: ['inventory', 'stock', storeId],
     enabled: storeId !== null,
-    queryFn: async () => (await pharmacyApi.inventory.stock({ query: { storeId: storeId as string } })).data,
+    queryFn: async () => (await pharmacyApi.inventory.stock(storeId as string)).data,
     staleTime: 15_000,
   });
   const shelfQuery = useQuery({

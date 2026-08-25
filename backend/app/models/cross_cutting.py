@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import JSON, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from uuid6 import uuid7
 
@@ -28,7 +28,9 @@ class AuditLog(AppendOnlyMixin, Base):
     #: HMAC signature over the row's canonical content; a mismatch on verify
     # proves the row was altered after insertion.
     entry_hash: Mapped[str | None] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(nullable=False)
+    # `DateTime(timezone=True)` is not cosmetic here: asyncpg binds by this type,
+    # and a naive declaration rejects the aware UTC datetimes the services write.
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class OutboxEvent(Base):
@@ -41,8 +43,8 @@ class OutboxEvent(Base):
     aggregate_type: Mapped[str] = mapped_column(String(120), nullable=False)
     aggregate_id: Mapped[UUID] = mapped_column(nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(nullable=False)
-    published_at: Mapped[datetime | None] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class IdempotencyRecord(Base):
@@ -55,4 +57,4 @@ class IdempotencyRecord(Base):
     request_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     response_status: Mapped[int | None] = mapped_column(Integer)
     response_body: Mapped[dict | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

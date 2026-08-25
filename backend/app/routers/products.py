@@ -100,6 +100,28 @@ async def list_current_store_products(
     return Envelope(data=Page(items=items, total=len(items)), request_id=request_id)
 
 
+@router.post(
+    "/current",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Envelope[StoreProductResponse],
+    summary="Enable a pharmacy product on the current branch's shelf",
+)
+async def enable_current_store_product(
+    payload: StoreProductEnableRequest,
+    session: SessionDep,
+    context: ProductManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[StoreProductResponse]:
+    """Session-scoped twin of ``POST /stores/{store_id}``.
+
+    The web shell manages the branch it is signed into and knows no other store id,
+    so it posts here; the numbered route stays for owners working across branches.
+    """
+    store = await load_current_store(session, context)
+    row, _created = await service.enable_store_product(session, context, store, payload, request_id=request_id)
+    return Envelope(data=StoreProductResponse.model_validate(row), request_id=request_id)
+
+
 @router.get("/{product_id}", response_model=Envelope[PharmacyProductResponse])
 async def read_pharmacy_product(
     product_id: UUID, session: SessionDep, context: ContextDep, request_id: RequestIdDep
