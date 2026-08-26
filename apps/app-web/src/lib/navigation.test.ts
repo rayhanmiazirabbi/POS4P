@@ -27,21 +27,21 @@ describe('navigation by role', () => {
     }
   });
 
-  it('gives a cashier the counter and the dashboard, nothing else', () => {
-    expect(hrefs('cashier')).toEqual(['/pos', '/dashboard']);
-    expect(mayVisit('cashier', '/catalogue')).toBe(false);
-    expect(mayVisit('cashier', '/purchasing')).toBe(false);
+  it('gives a cashier the counter, dashboard, catalogue search, and purchase orders', () => {
+    expect(hrefs('cashier')).toEqual(['/pos', '/dashboard', '/catalogue', '/purchasing']);
+    expect(mayVisit('cashier', '/catalogue')).toBe(true);
+    expect(mayVisit('cashier', '/purchasing')).toBe(true);
     expect(mayVisit('cashier', '/inventory')).toBe(false);
   });
 
-  it('keeps inventory staff off the counter and off purchasing', () => {
+  it('keeps inventory staff off the counter but on orders and the catalogue', () => {
     // No `sales.create`: the server refuses every sale from this role, so offering
     // the till would only produce a screen that cannot complete its one action.
-    // No `purchases.manage` either -- entering a purchase means entering unit costs,
-    // and this role is denied `reports.read_costs`.
-    expect(hrefs('inventory_staff')).toEqual(['/dashboard', '/inventory']);
+    // Purchase orders are paperwork every store role writes; converting them into
+    // a cost-bearing purchase stays manager+ inside the page.
+    expect(hrefs('inventory_staff')).toEqual(['/dashboard', '/catalogue', '/inventory', '/purchasing']);
     expect(mayVisit('inventory_staff', '/pos')).toBe(false);
-    expect(mayVisit('inventory_staff', '/purchasing')).toBe(false);
+    expect(mayVisit('inventory_staff', '/purchasing')).toBe(true);
   });
 
   it('lands every role on a surface it actually holds', () => {

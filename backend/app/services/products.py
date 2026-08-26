@@ -1,28 +1,39 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.context import RequestContext
-from app.domains.catalog import CatalogProduct
+from app.domains.catalog import (
+    CatalogAlias,
+    CatalogBarcode,
+    CatalogProduct,
+    DosageForm,
+    Manufacturer,
+)
+from app.domains.inventory import InventoryBalance
 from app.domains.products import PharmacyProduct, StoreProduct, StoreProductPrice
-from app.errors import Conflict, NotFound
+from app.errors import Conflict, NotFound, ValidationError
 from app.models import Store
 from app.schemas.products import (
+    CatalogSearchItemResponse,
     PharmacyProductCreateRequest,
     PharmacyProductStatusRequest,
     PharmacyProductUpdateRequest,
+    ProductAdoptRequest,
+    ProductAdoptResponse,
     StoreProductEnableRequest,
     StoreProductStatusRequest,
     StoreProductUpdateRequest,
 )
 from app.services.audit import record_audit, redact
-from app.services.stores import load_store
+from app.services.stores import load_current_store, load_store
 
 PRODUCT_MANAGER_ACTIONS = frozenset({"create", "update", "status"})
 
@@ -211,7 +222,7 @@ async def load_store_product(
 
 
 def local_effective_at() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 async def _assert_sku_free_in_store(
@@ -503,3 +514,425 @@ async def count_store_products(session: AsyncSession, store: Store) -> int:
             .where(StoreProduct.store_id == store.id)
         )
     )
+
+
+# --- unified catalogue search -------------------------------------------------
+
+#: Candidate ceiling for each side of a search (catalogue and org products).
+#: The merge and rank happen in Python, so an unbounded fetch would let one
+#: broad query drag the whole org product list plus the catalogue through
+#: memory; stage 3 replaces this with proper full-text ranking (pg_trgm).
+SEARCH_MATCH_CAP = 500
+
+
+async def _matched_catalog_products(session: AsyncSession, needle: str) -> list[CatalogProduct]:
+    alias_ids = select(CatalogAlias.catalog_product_id).where(
+        CatalogAlias.alias.ilike(f"%{needle}%")
+    )
+    barcode_ids = select(CatalogBarcode.catalog_product_id).where(CatalogBarcode.barcode == needle)
+    return list(
+        (
+            await session.scalars(
+                select(CatalogProduct)
+                .where(
+                    CatalogProduct.active.is_(True),
+                    or_(
+                        CatalogProduct.name.ilike(f"%{needle}%"),
+                        CatalogProduct.generic_name.ilike(f"%{needle}%"),
+                        CatalogProduct.id.in_(alias_ids),
+                        CatalogProduct.id.in_(barcode_ids),
+                    ),
+                )
+                .order_by(CatalogProduct.name)
+                .limit(SEARCH_MATCH_CAP)
+            )
+        ).all()
+    )
+
+
+def _search_rank(needle: str) -> Callable[[CatalogSearchItemResponse], tuple[int, str]]:
+    """Exact barcode hits first, then alphabetical -- the order a counter expects."""
+
+    def key(item: CatalogSearchItemResponse) -> tuple[int, str]:
+        barcode = item.barcode or ""
+        exact = barcode.strip().lower() == needle.lower()
+        return (0 if exact else 1, item.name.lower())
+
+    return key
+
+
+async def search_unified(
+    session: AsyncSession,
+    context: RequestContext,
+    store: Store,
+    *,
+    q: str,
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[list[CatalogSearchItemResponse], int]:
+    """One search box across the shared catalogue and the org's own products.
+
+    A pharmacy product linked to a catalogue entry renders as a single ``catalog``
+    row carrying its shelf status; unlinked org products render as ``custom`` rows.
+    Status is relative to ``store``: ``on_shelf`` needs an active shelf row, then
+    ``in_org``, then ``absent``.
+    """
+    needle = q.strip()
+    if not needle:
+        raise ValidationError("A search term is required")
+
+    matched_pharmacy = list(
+        await session.scalars(
+            select(PharmacyProduct)
+            .where(
+                PharmacyProduct.organization_id == context.organization_id,
+                PharmacyProduct.active.is_(True),
+                or_(
+                    PharmacyProduct.name.ilike(f"%{needle}%"),
+                    PharmacyProduct.barcode == needle,
+                ),
+            )
+            .order_by(PharmacyProduct.name)
+            .limit(SEARCH_MATCH_CAP)
+        )
+    )
+
+    matched_catalog = await _matched_catalog_products(session, needle)
+    catalog_ids = {row.id for row in matched_catalog}
+    catalog_ids.update(p.catalog_product_id for p in matched_pharmacy if p.catalog_product_id)
+
+    catalog_rows: dict[UUID, CatalogProduct] = {row.id: row for row in matched_catalog}
+    if catalog_ids - set(catalog_rows):
+        linked = list(
+            await session.scalars(
+                select(CatalogProduct).where(CatalogProduct.id.in_(catalog_ids))
+            )
+        )
+        for linked_catalog in linked:
+            catalog_rows[linked_catalog.id] = linked_catalog
+
+    # The full linkage picture, not just the matches: a catalogue row whose org
+    # product exists but did not itself match must still report in_org.
+    org_by_catalog: dict[UUID, PharmacyProduct] = {}
+    if catalog_ids:
+        linked_org = list(
+            await session.scalars(
+                select(PharmacyProduct).where(
+                    PharmacyProduct.organization_id == context.organization_id,
+                    PharmacyProduct.active.is_(True),
+                    PharmacyProduct.catalog_product_id.in_(catalog_ids),
+                )
+            )
+        )
+        for linked_row in linked_org:
+            assert linked_row.catalog_product_id is not None
+            org_by_catalog.setdefault(linked_row.catalog_product_id, linked_row)
+
+    pharmacy_ids = {p.id for p in matched_pharmacy if p.catalog_product_id is None}
+    pharmacy_ids |= {p.id for p in org_by_catalog.values()}
+    shelf_by_product: dict[UUID, tuple[StoreProduct, Decimal]] = {}
+    if pharmacy_ids:
+        shelf_rows = list(
+            await session.execute(
+                select(StoreProduct, InventoryBalance)
+                .outerjoin(InventoryBalance, InventoryBalance.store_product_id == StoreProduct.id)
+                .where(
+                    StoreProduct.store_id == store.id,
+                    StoreProduct.pharmacy_product_id.in_(pharmacy_ids),
+                )
+            )
+        )
+        for shelf_row, balance in shelf_rows:
+            available = (
+                Decimal(balance.on_hand) - Decimal(balance.reserved)
+                if balance is not None
+                else Decimal(0)
+            )
+            shelf_by_product[shelf_row.pharmacy_product_id] = (shelf_row, available)
+
+    barcode_of: dict[UUID, str] = {}
+    if catalog_ids:
+        barcode_rows = await session.scalars(
+            select(CatalogBarcode).where(CatalogBarcode.catalog_product_id.in_(catalog_ids))
+        )
+        for barcode_row in barcode_rows:
+            barcode_of.setdefault(barcode_row.catalog_product_id, barcode_row.barcode)
+
+    manufacturer_ids = {row.manufacturer_id for row in catalog_rows.values() if row.manufacturer_id}
+    form_ids = {row.dosage_form_id for row in catalog_rows.values() if row.dosage_form_id}
+    manufacturers = {
+        row.id: row.name
+        for row in await session.scalars(select(Manufacturer).where(Manufacturer.id.in_(manufacturer_ids)))
+    } if manufacturer_ids else {}
+    forms = {
+        row.id: row.name
+        for row in await session.scalars(select(DosageForm).where(DosageForm.id.in_(form_ids)))
+    } if form_ids else {}
+
+    items: list[CatalogSearchItemResponse] = []
+    claimed_products: set[UUID] = set()
+
+    def attach_shop(
+        item: CatalogSearchItemResponse, product: PharmacyProduct | None
+    ) -> None:
+        if product is None or product.active is False:
+            return
+        item.pharmacy_product_id = product.id
+        item.shop_status = "in_org"
+        claimed_products.add(product.id)
+        if product.barcode and item.barcode is None:
+            item.barcode = product.barcode
+        shelf = shelf_by_product.get(product.id)
+        if shelf is not None and shelf[0].active:
+            shelf_row, available = shelf
+            item.kind = "catalog" if item.catalog_product_id else "custom"
+            item.store_product_id = shelf_row.id
+            item.sku = shelf_row.sku
+            item.sale_price = shelf_row.sale_price
+            item.available_quantity = available
+            item.shop_status = "on_shelf"
+
+    rendered_catalog: set[UUID] = set()
+    for catalog_id, catalog_row in sorted(catalog_rows.items(), key=lambda pair: pair[1].name.lower()):
+        if not catalog_row.active:
+            # Inactive catalogue entries stay out of the results; their org
+            # products fall through to the custom loop below instead of
+            # vanishing with the entry.
+            continue
+        rendered_catalog.add(catalog_id)
+        item = CatalogSearchItemResponse(
+            kind="catalog",
+            catalog_product_id=catalog_row.id,
+            name=catalog_row.name,
+            generic_name=catalog_row.generic_name,
+            strength=catalog_row.strength,
+            barcode=barcode_of.get(catalog_row.id),
+            dosage_form_id=catalog_row.dosage_form_id,
+            dosage_form=forms.get(catalog_row.dosage_form_id) if catalog_row.dosage_form_id else None,
+            manufacturer_id=catalog_row.manufacturer_id,
+            manufacturer=manufacturers.get(catalog_row.manufacturer_id) if catalog_row.manufacturer_id else None,
+            package_size=catalog_row.package_size,
+            package_unit=catalog_row.package_unit,
+            prescription_required=catalog_row.prescription_required,
+            reference_unit_price=catalog_row.unit_price,
+            reference_strip_price=catalog_row.strip_price,
+        )
+        attach_shop(item, org_by_catalog.get(catalog_id))
+        items.append(item)
+
+    for product in matched_pharmacy:
+        if product.id in claimed_products or product.catalog_product_id in rendered_catalog:
+            continue
+        item = CatalogSearchItemResponse(
+            kind="custom",
+            name=product.name,
+            barcode=product.barcode,
+            package_unit=product.unit,
+        )
+        attach_shop(item, product)
+        items.append(item)
+
+    items.sort(key=_search_rank(needle))
+    total = len(items)
+    return items[offset : offset + limit], total
+
+
+# --- adoption -----------------------------------------------------------------
+
+
+def _sku_seed(catalog: CatalogProduct) -> str:
+    text = f"{catalog.name} {catalog.strength or ''}"
+    slug = "".join(char for char in text.upper() if char.isalnum())[:12]
+    return slug or "ITEM"
+
+
+async def _generate_sku(session: AsyncSession, store: Store, catalog: CatalogProduct) -> str:
+    """Deterministic SKU from the catalogue identity; suffixed until unique.
+
+    Uniqueness is checked against every row ever created in the store, not just
+    active ones -- the database constraint does not care whether the colliding
+    row is on the shelf. The seed is alphanumeric only, so the LIKE prefix
+    cannot be reinterpreted as wildcards.
+    """
+    seed = _sku_seed(catalog)
+    taken = set(
+        await session.scalars(
+            select(StoreProduct.sku).where(
+                StoreProduct.store_id == store.id,
+                StoreProduct.sku.like(f"{seed}%"),
+            )
+        )
+    )
+    candidate = seed
+    suffix = 1
+    while candidate in taken:
+        suffix += 1
+        candidate = f"{seed}-{suffix}"
+    return candidate
+
+
+async def adopt_catalog_product(
+    session: AsyncSession,
+    context: RequestContext,
+    payload: ProductAdoptRequest,
+    *,
+    request_id: str,
+) -> ProductAdoptResponse:
+    """Bring a catalogue entry into this shop and onto a branch shelf.
+
+    Reuses an existing org product for the entry (reactivating it when it was
+    soft-deleted) so repeated adoption never forks duplicates. Barcode auto-fill
+    is best-effort: the org-wide unique-active-barcode constraint can lose a race
+    with another branch adopting at the same moment, and losing that race must
+    never fail the adoption itself.
+    """
+    catalog = await session.get(CatalogProduct, payload.catalog_product_id)
+    if catalog is None or not catalog.active:
+        raise NotFound("Catalog product not found")
+
+    store = (
+        await load_store(session, context, payload.store_id)
+        if payload.store_id is not None
+        else await load_current_store(session, context)
+    )
+
+    sale_price = payload.sale_price if payload.sale_price is not None else catalog.unit_price
+    if sale_price is None:
+        raise ValidationError(
+            "Adoption needs a price: pass salePrice or set unitPrice on the catalogue entry"
+        )
+
+    product = await session.scalar(
+        select(PharmacyProduct).where(
+            PharmacyProduct.organization_id == context.organization_id,
+            PharmacyProduct.catalog_product_id == catalog.id,
+        )
+    )
+    reactivated = False
+    created_product = False
+    if product is not None:
+        reactivated = not product.active
+        product.active = True
+        session.add(product)
+    else:
+        created_product = True
+        product = PharmacyProduct(
+            organization_id=context.organization_id,
+            catalog_product_id=catalog.id,
+            name=catalog.name,
+            unit=catalog.package_unit,
+            active=True,
+        )
+        session.add(product)
+        await session.flush()
+
+    existing_shelf = await _load_store_product_by_pharmacy_id(session, store, product.id)
+    created_shelf = existing_shelf is None
+    old_price: Decimal | None = None
+    sku = payload.sku
+    if existing_shelf is None:
+        shelf_row = StoreProduct(
+            organization_id=context.organization_id,
+            store_id=store.id,
+            pharmacy_product_id=product.id,
+            sku=sku or await _generate_sku(session, store, catalog),
+            sale_price=sale_price,
+            minimum_stock=payload.minimum_stock,
+            rack=payload.rack,
+            active=True,
+        )
+        session.add(shelf_row)
+    else:
+        shelf_row = existing_shelf
+        shelf_row.active = True
+        if sku is not None:
+            await _assert_sku_free_in_store(session, store, sku, exclude=shelf_row.id)
+            shelf_row.sku = sku
+        old_price = shelf_row.sale_price
+        shelf_row.sale_price = sale_price
+        shelf_row.minimum_stock = payload.minimum_stock
+        if payload.rack is not None:
+            shelf_row.rack = payload.rack
+
+    record_audit(
+        session,
+        replace_store_context(context, store),
+        action="product.adopted",
+        entity_type="pharmacy_product",
+        entity_id=product.id,
+        request_id=request_id,
+        after=redact(
+            {
+                "catalogProductId": str(catalog.id),
+                "pharmacyProductId": str(product.id),
+                "storeProductId": str(shelf_row.id),
+                "sku": shelf_row.sku,
+                "salePrice": str(shelf_row.sale_price),
+                "createdProduct": created_product,
+                "createdShelfRow": created_shelf,
+                "reactivated": reactivated,
+            }
+        ),
+    )
+    if old_price is not None and old_price != shelf_row.sale_price:
+        # Parity with enable/update: a changed price on a live shelf row leaves a
+        # history entry behind -- in the same transaction as the change itself.
+        _append_price_history(session, replace_store_context(context, store), shelf_row, old_price)
+
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise Conflict("Adoption conflicts with an existing product or SKU") from exc
+    except Exception:
+        await session.rollback()
+        raise
+
+    if created_product:
+        # Best-effort and separate from the adoption commit: losing the barcode
+        # race must never roll back an adopted product.
+        await _autofill_barcode(session, context, product, request_id=request_id)
+
+    return ProductAdoptResponse.model_validate(
+        {"pharmacy_product": product, "store_product": shelf_row}
+    )
+
+
+async def _autofill_barcode(
+    session: AsyncSession,
+    context: RequestContext,
+    product: PharmacyProduct,
+    *,
+    request_id: str,
+) -> None:
+    """Copy the first catalogue barcode onto a freshly adopted org product."""
+    first = await session.scalar(
+        select(CatalogBarcode.barcode)
+        .where(CatalogBarcode.catalog_product_id == product.catalog_product_id)
+        .order_by(CatalogBarcode.barcode)
+        .limit(1)
+    )
+    if first is None or not await _barcode_free(session, context, first):
+        return
+    product.barcode = first
+    try:
+        await session.commit()
+    except IntegrityError:
+        # Another branch won the race; the adoption stands without a barcode.
+        await session.rollback()
+        product.barcode = None
+
+
+async def _barcode_free(
+    session: AsyncSession, context: RequestContext, barcode: str | None
+) -> bool:
+    if not barcode:
+        return False
+    existing = await session.scalar(
+        select(PharmacyProduct.id).where(
+            PharmacyProduct.organization_id == context.organization_id,
+            PharmacyProduct.barcode == barcode,
+            PharmacyProduct.active.is_(True),
+        )
+    )
+    return existing is None

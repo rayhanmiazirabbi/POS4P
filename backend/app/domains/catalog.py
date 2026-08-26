@@ -12,6 +12,7 @@ from app.models.base import (
     Base,
     TimestampMixin,
     UUIDPrimaryKeyMixin,
+    money_column,
     quantity_column,
 )
 
@@ -38,17 +39,26 @@ class DosageForm(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class CatalogProduct(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "catalog_products"
-    __table_args__ = (Index("ix_catalog_product_name", "name"),)
+    __table_args__ = (
+        Index("ix_catalog_product_name", "name"),
+        Index("ix_catalog_product_generic_name", "generic_name"),
+    )
 
     manufacturer_id: Mapped[UUID | None] = mapped_column(ForeignKey("manufacturers.id"))
     dosage_form_id: Mapped[UUID | None] = mapped_column(ForeignKey("dosage_forms.id"))
     name: Mapped[str] = mapped_column(String(240), nullable=False)
+    generic_name: Mapped[str | None] = mapped_column(String(240))
     strength: Mapped[str | None] = mapped_column(String(100))
     package_size: Mapped[Decimal] = mapped_column(quantity_column(), default=1, nullable=False)
     package_unit: Mapped[str] = mapped_column(String(40), nullable=False)
     prescription_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     country_code: Mapped[str] = mapped_column(String(2), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Reference prices only: adoption prefills the store's sale price from these,
+    # but the shelf price is always authoritative. Nullable because most rows are
+    # imported before anyone has priced them.
+    unit_price: Mapped[Decimal | None] = mapped_column(money_column())
+    strip_price: Mapped[Decimal | None] = mapped_column(money_column())
 
 
 class CatalogProductIngredient(UUIDPrimaryKeyMixin, Base):

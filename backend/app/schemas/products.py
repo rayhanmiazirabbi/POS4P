@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import Field, field_validator
@@ -127,3 +127,57 @@ class StoreProductPriceResponse(ApiModel):
     store_product_id: UUID
     price: Decimal
     effective_at: datetime
+
+
+class CatalogSearchItemResponse(ApiModel):
+    """One merged row of ``GET /products/search``.
+
+    ``kind`` says which identity the row carries: ``catalog`` rows are global
+    catalogue entries (possibly linked to an org product), ``custom`` rows exist
+    only in the org. The shelf fields (``store_product_id``, ``sku``,
+    ``sale_price``, ``available_quantity``) are populated only for the store the
+    token is pinned to.
+    """
+
+    kind: Literal["catalog", "custom"]
+    catalog_product_id: UUID | None = None
+    pharmacy_product_id: UUID | None = None
+    store_product_id: UUID | None = None
+    shop_status: Literal["on_shelf", "in_org", "absent"] = "absent"
+    name: str
+    barcode: str | None = None
+    generic_name: str | None = None
+    strength: str | None = None
+    dosage_form_id: UUID | None = None
+    dosage_form: str | None = None
+    manufacturer_id: UUID | None = None
+    manufacturer: str | None = None
+    package_size: Decimal | None = None
+    package_unit: str | None = None
+    prescription_required: bool = False
+    reference_unit_price: Decimal | None = None
+    reference_strip_price: Decimal | None = None
+    sale_price: Decimal | None = None
+    available_quantity: Decimal | None = None
+    sku: str | None = None
+
+
+class ProductAdoptRequest(ApiModel):
+    """Adopt a catalogue entry onto this shop and its shelf."""
+
+    catalog_product_id: UUID
+    store_id: UUID | None = None
+    sku: Sku | None = None
+    sale_price: Money | None = None
+    minimum_stock: Quantity = Decimal("0")
+    rack: Rack | None = None
+
+    @field_validator("rack", "sku")
+    @classmethod
+    def _strip_fields(cls, value: str | None) -> str | None:
+        return _strip(value)
+
+
+class ProductAdoptResponse(ApiModel):
+    pharmacy_product: PharmacyProductResponse
+    store_product: StoreProductResponse

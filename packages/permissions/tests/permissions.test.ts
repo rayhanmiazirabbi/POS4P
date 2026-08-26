@@ -9,15 +9,16 @@ import {
 const ROLES: Role[] = ['owner', 'manager', 'cashier', 'inventory_staff'];
 const CAPABILITIES: Capability[] = [
   'organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund',
-  'inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read', 'reports.read_costs',
+  'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage',
+  'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs',
 ];
 
 /** The full role × capability expectation, pinned so a matrix edit is a deliberate act. */
 const EXPECTED: Record<Role, readonly Capability[]> = {
-  owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read', 'reports.read_costs'],
-  manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read', 'reports.read_costs'],
-  cashier: ['sales.create', 'inventory.read', 'reports.read'],
-  inventory_staff: ['inventory.read', 'inventory.adjust', 'reports.read'],
+  owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
+  manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
+  cashier: ['sales.create', 'inventory.read', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
+  inventory_staff: ['inventory.read', 'inventory.adjust', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
 };
 
 describe('role × capability matrix', () => {
@@ -46,6 +47,19 @@ describe('role × capability matrix', () => {
     for (const role of ROLES) {
       if (can(role, 'purchases.manage')) expect(can(role, 'reports.read_costs'), role).toBe(true);
     }
+  });
+
+  it('splits order paperwork from cost-bearing purchases', () => {
+    // Purchase orders are what the shop needs written down before goods arrive;
+    // every store role writes them. Conversion into a purchase stays behind the
+    // owner/manager `purchases.manage` grant on both server and matrix.
+    for (const role of ROLES) {
+      expect(can(role, 'purchasing.orders.manage'), `${role}/orders`).toBe(true);
+      expect(can(role, 'catalogue.search'), `${role}/search`).toBe(true);
+    }
+    expect(can('cashier', 'products.adopt')).toBe(false);
+    expect(can('inventory_staff', 'products.adopt')).toBe(false);
+    expect(can('cashier', 'purchases.manage')).toBe(false);
   });
 
   it('leaves inventory_staff able to receive stock', () => {

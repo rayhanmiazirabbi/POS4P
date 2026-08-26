@@ -14,6 +14,7 @@ from app.routers.organizations import router as organizations_router
 from app.routers.payments import router as payments_router
 from app.routers.prescriptions import router as prescriptions_router
 from app.routers.products import router as products_router
+from app.routers.purchase_orders import router as purchase_orders_router
 from app.routers.purchasing import router as purchasing_router
 from app.routers.reports import router as reports_router
 from app.routers.sales import router as sales_router
@@ -40,6 +41,7 @@ __all__ = [
     "organizations_router",
     "payments_router",
     "products_router",
+    "purchase_orders_router",
     "purchasing_router",
     "sales_router",
     "reports_router",

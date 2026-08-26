@@ -1,0 +1,19 @@
+{
+  "columnMap": {
+    "name": "Product Name",
+    "genericName": "Generic Name",
+    "strength": "Strength",
+    "dosageForm": "Dosage Form",
+    "manufacturer": "Manufacturer",
+    "packageSize": "Pack Size",
+    "unitPrice": "Unit Price",
+    "stripPrice": "Strip Price",
+    "prescriptionRequired": "Rx",
+    "barcodes": ["Barcode", "Barcode 2"]
+  },
+  "defaults": {
+    "countryCode": "BD",
+    "packageUnit": "piece",
+    "packageSize": "1"
+  }
+}

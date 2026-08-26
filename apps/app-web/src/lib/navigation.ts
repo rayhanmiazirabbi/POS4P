@@ -14,14 +14,19 @@ export type PosRoute = { href: string; label: string; capability: Capability };
  * server will accept are the same set. `navigationMatchesBackend` in the tests
  * pins that correspondence.
  *
+ * Catalogue and purchasing open to every store role now: unified search is
+ * read-only (`catalogue.search`) and purchase orders are counter paperwork
+ * (`purchasing.orders.manage`). The owner-only actions on those pages gate
+ * themselves against `products.adopt` / `purchases.manage` inside the page.
+ *
  * Order matters: the first entry a role holds is where that role lands.
  */
 export const POS_ROUTES: readonly PosRoute[] = [
   { href: '/pos', label: 'POS', capability: 'sales.create' },
   { href: '/dashboard', label: 'Dashboard', capability: 'reports.read' },
-  { href: '/catalogue', label: 'Catalogue', capability: 'store.manage' },
+  { href: '/catalogue', label: 'Catalogue', capability: 'catalogue.search' },
   { href: '/inventory', label: 'Inventory', capability: 'inventory.adjust' },
-  { href: '/purchasing', label: 'Purchasing', capability: 'purchases.manage' },
+  { href: '/purchasing', label: 'Purchasing', capability: 'purchasing.orders.manage' },
 ];
 
 /** Whether `pathname` is `href` or something nested under it -- segment-aware, so

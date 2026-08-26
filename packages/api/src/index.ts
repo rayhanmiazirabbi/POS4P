@@ -58,6 +58,7 @@ export type { FetchLike, FetchTransportConfig } from './transport';
 
 export {
   createAuthClient,
+  createCatalogClient,
   createCustomersClient,
   createEcommerceClient,
   createInventoryClient,
@@ -67,6 +68,7 @@ export {
   createPharmacyApi,
   createPrescriptionsClient,
   createProductsClient,
+  createPurchaseOrdersClient,
   createPurchasesClient,
   createReportsClient,
   createResourceClient,
@@ -78,6 +80,8 @@ export {
   createUsersClient,
 } from './resources';
 export type {
+  AdoptPayload,
+  AdoptResult,
   AuthClient,
   AuthSession,
   CurrentOrganization,
@@ -158,6 +162,12 @@ export type {
   UsersClient,
 } from './resources';
 export type {
+  CatalogClient,
+  CatalogProductCreateRequest,
+  CatalogProductRecord,
+  CatalogReference,
+  CatalogSearchItem,
+  CatalogSearchParams,
   Customer,
   CustomerAddress,
   CustomerAddressCreateRequest,
@@ -181,9 +191,17 @@ export type {
   PharmacyProduct,
   PharmacyProductCreateRequest,
   ProductsClient,
+  PoConvertResult,
   Purchase,
   PurchaseCreateRequest,
   PurchaseItem,
+  PurchaseOrder,
+  PurchaseOrderCreateRequest,
+  PurchaseOrderItem,
+  PurchaseOrderItemAddRequest,
+  PurchaseOrderItemUpdateRequest,
+  PurchaseOrderStatusWire,
+  PurchaseOrdersClient,
   PurchasesClient,
   PurchaseStatus,
   ReceiveBatchRequest,

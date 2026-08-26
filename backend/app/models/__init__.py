@@ -29,6 +29,11 @@ from app.domains.orders import Order, OrderItem, OrderStatusHistory
 from app.domains.payments import Payment, PaymentRefund
 from app.domains.prescriptions import Prescription, PrescriptionFile, PrescriptionReview
 from app.domains.products import PharmacyProduct, StoreProduct, StoreProductPrice
+from app.domains.purchase_orders import (
+    PurchaseOrder,
+    PurchaseOrderItem,
+    PurchaseOrderStatus,
+)
 from app.domains.purchasing import Purchase, PurchaseItem
 from app.domains.reports import DailyStoreMetric, StoreExpense
 from app.domains.sales import Sale, SaleItem, SaleItemBatchAllocation, SaleReturn
@@ -102,6 +107,9 @@ __all__ = [
     "Purchase",
     "PurchaseAcknowledgement",
     "PurchaseItem",
+    "PurchaseOrder",
+    "PurchaseOrderItem",
+    "PurchaseOrderStatus",
     "RecordStatus",
     "Role",
     "Sale",

@@ -245,6 +245,7 @@ async def list_dosage_forms(session: AsyncSession) -> list[DosageForm]:
 def product_snapshot(product: CatalogProduct) -> dict[str, Any]:
     return {
         "name": product.name,
+        "genericName": product.generic_name,
         "manufacturerId": str(product.manufacturer_id) if product.manufacturer_id else None,
         "dosageFormId": str(product.dosage_form_id) if product.dosage_form_id else None,
         "strength": product.strength,
@@ -253,6 +254,8 @@ def product_snapshot(product: CatalogProduct) -> dict[str, Any]:
         "prescriptionRequired": product.prescription_required,
         "countryCode": product.country_code,
         "active": product.active,
+        "unitPrice": str(product.unit_price) if product.unit_price is not None else None,
+        "stripPrice": str(product.strip_price) if product.strip_price is not None else None,
     }
 
 
@@ -331,6 +334,7 @@ async def create_product(
     await _resolve_links(session, payload.manufacturer_id, payload.dosage_form_id)
     product = CatalogProduct(
         name=payload.clean_name,
+        generic_name=payload.clean_generic_name,
         manufacturer_id=payload.manufacturer_id,
         dosage_form_id=payload.dosage_form_id,
         strength=payload.strength,
@@ -339,6 +343,8 @@ async def create_product(
         prescription_required=payload.prescription_required,
         country_code=payload.country_code.upper(),
         active=payload.active,
+        unit_price=payload.unit_price,
+        strip_price=payload.strip_price,
     )
     session.add(product)
     try:
@@ -470,6 +476,7 @@ async def search_products(
             conditions.append(
                 or_(
                     CatalogProduct.name.ilike(f"%{needle}%"),
+                    CatalogProduct.generic_name.ilike(f"%{needle}%"),
                     CatalogProduct.id.in_(alias_product_ids),
                     CatalogProduct.id.in_(barcode_product_ids),
                 )

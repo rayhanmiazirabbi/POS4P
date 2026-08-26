@@ -52,6 +52,7 @@ def _product_body(detail: dict) -> CatalogProductResponse:
     return CatalogProductResponse(
         id=product.id,
         name=product.name,
+        generic_name=product.generic_name,
         manufacturer_id=product.manufacturer_id,
         dosage_form_id=product.dosage_form_id,
         strength=product.strength,
@@ -60,6 +61,8 @@ def _product_body(detail: dict) -> CatalogProductResponse:
         prescription_required=product.prescription_required,
         country_code=product.country_code,
         active=product.active,
+        unit_price=product.unit_price,
+        strip_price=product.strip_price,
         ingredients=[
             ProductIngredientResponse(
                 active_ingredient_id=row.active_ingredient_id,

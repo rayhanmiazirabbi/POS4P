@@ -12,6 +12,7 @@ from app.schemas.base import ApiModel
 Name = Annotated[str, Field(min_length=1, max_length=160)]
 CountryCode = Annotated[str, Field(min_length=2, max_length=2)]
 PackageName = Annotated[str, Field(min_length=1, max_length=40)]
+MoneyRef = Annotated[Decimal, Field(ge=0, decimal_places=2)]
 
 
 def _clean(value: str) -> str:
@@ -86,6 +87,7 @@ class AliasIn(ApiModel):
 
 class ProductCreateRequest(ApiModel):
     name: Annotated[str, Field(min_length=1, max_length=240)]
+    generic_name: Annotated[str | None, Field(max_length=240)] = None
     manufacturer_id: UUID | None = None
     dosage_form_id: UUID | None = None
     strength: Annotated[str | None, Field(max_length=100)] = None
@@ -94,6 +96,8 @@ class ProductCreateRequest(ApiModel):
     prescription_required: bool = False
     country_code: CountryCode
     active: bool = True
+    unit_price: MoneyRef | None = None
+    strip_price: MoneyRef | None = None
     ingredients: list[ProductIngredientIn] = Field(default_factory=list)
     barcodes: list[BarcodeIn] = Field(default_factory=list)
     aliases: list[AliasIn] = Field(default_factory=list)
@@ -102,9 +106,14 @@ class ProductCreateRequest(ApiModel):
     def clean_name(self) -> str:
         return _clean(self.name)
 
+    @property
+    def clean_generic_name(self) -> str | None:
+        return _clean(self.generic_name) if self.generic_name is not None else None
+
 
 class ProductUpdateRequest(ApiModel):
     name: Annotated[str | None, Field(min_length=1, max_length=240)] = None
+    generic_name: Annotated[str | None, Field(max_length=240)] = None
     manufacturer_id: UUID | None = None
     dosage_form_id: UUID | None = None
     strength: Annotated[str | None, Field(max_length=100)] = None
@@ -113,6 +122,8 @@ class ProductUpdateRequest(ApiModel):
     prescription_required: bool | None = None
     country_code: CountryCode | None = None
     active: bool | None = None
+    unit_price: MoneyRef | None = None
+    strip_price: MoneyRef | None = None
 
 
 class ProductIngredientResponse(ApiModel):
@@ -124,6 +135,7 @@ class ProductIngredientResponse(ApiModel):
 class CatalogProductResponse(ApiModel):
     id: UUID
     name: str
+    generic_name: str | None = None
     manufacturer_id: UUID | None = None
     dosage_form_id: UUID | None = None
     strength: str | None = None
@@ -132,6 +144,8 @@ class CatalogProductResponse(ApiModel):
     prescription_required: bool
     country_code: str
     active: bool
+    unit_price: Decimal | None = None
+    strip_price: Decimal | None = None
     ingredients: list[ProductIngredientResponse] = Field(default_factory=list)
     barcodes: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)

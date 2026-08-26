@@ -62,6 +62,7 @@ async def create_purchase(
     payload: PurchaseCreateRequest,
     *,
     request_id: str,
+    commit: bool = True,
 ) -> Purchase:
     """Create a DRAFT with server-computed totals; nothing touches stock yet."""
     if context.role not in WRITER_ROLES:
@@ -110,7 +111,8 @@ async def create_purchase(
         request_id=request_id,
         after=redact({"supplier_id": str(payload.supplier_id), "total": str(total)}),
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return purchase
 
 

@@ -4,6 +4,7 @@ import type { Role, StoreMembership } from '@pharmacy/types';
 export type Capability =
   | 'organization.manage' | 'store.manage' | 'users.manage' | 'sales.create'
   | 'sales.refund' | 'inventory.read' | 'inventory.adjust' | 'purchases.manage'
+  | 'purchasing.orders.manage' | 'catalogue.search' | 'products.adopt'
   | 'reports.read' | 'reports.read_costs';
 
 /**
@@ -16,12 +17,19 @@ export type Capability =
  * backend already enforces owner/manager on `POST /purchases`, so the grant only
  * ever promised inventory staff a screen the server answers 403 to.
  * Receiving stock is separate and still theirs, via `inventory.adjust`.
+ *
+ * Purchase orders are a different document on purpose (`purchasing.orders.manage`):
+ * writing down what to order is counter work every store role does, including
+ * cashiers -- only converting an order into a cost-bearing purchase stays
+ * manager+. Searching the unified catalogue (`catalogue.search`) is read-only and
+ * open to everyone; acting on it (`products.adopt`, or the legacy writes under
+ * `store.manage`) stops at owner/manager, matching the server.
  */
 const matrix: Record<Role, readonly Capability[]> = {
-  owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read', 'reports.read_costs'],
-  manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'reports.read', 'reports.read_costs'],
-  cashier: ['sales.create', 'inventory.read', 'reports.read'],
-  inventory_staff: ['inventory.read', 'inventory.adjust', 'reports.read'],
+  owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
+  manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
+  cashier: ['sales.create', 'inventory.read', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
+  inventory_staff: ['inventory.read', 'inventory.adjust', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
 };
 
 export function can(role: Role, capability: Capability): boolean { return matrix[role]?.includes(capability) ?? false; }

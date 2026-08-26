@@ -10,10 +10,13 @@ from app.dependencies import ContextDep, RequestIdDep, SessionDep, require_roles
 from app.models import Role
 from app.schemas.base import Envelope, Page
 from app.schemas.products import (
+    CatalogSearchItemResponse,
     PharmacyProductCreateRequest,
     PharmacyProductResponse,
     PharmacyProductStatusRequest,
     PharmacyProductUpdateRequest,
+    ProductAdoptRequest,
+    ProductAdoptResponse,
     ShelfItemResponse,
     StoreProductEnableRequest,
     StoreProductPriceResponse,
@@ -22,7 +25,7 @@ from app.schemas.products import (
     StoreProductUpdateRequest,
 )
 from app.services import products as service
-from app.services.stores import load_store, load_current_store
+from app.services.stores import load_current_store, load_store
 
 router = APIRouter(prefix="/products", tags=["Products"])
 
@@ -120,6 +123,48 @@ async def enable_current_store_product(
     store = await load_current_store(session, context)
     row, _created = await service.enable_store_product(session, context, store, payload, request_id=request_id)
     return Envelope(data=StoreProductResponse.model_validate(row), request_id=request_id)
+
+
+@router.get(
+    "/search",
+    response_model=Envelope[Page[CatalogSearchItemResponse]],
+    summary="Unified catalogue + shop search",
+)
+async def search_products_unified(
+    session: SessionDep,
+    context: ContextDep,
+    request_id: RequestIdDep,
+    q: Annotated[str, Query(min_length=1, max_length=120)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Envelope[Page[CatalogSearchItemResponse]]:
+    """One search box merging the global catalogue with the org's own products.
+
+    **Declared before ``/{product_id}``, like ``/current`` above it.** The
+    literal-vs-parameter ordering bug is documented there; ``search`` and
+    ``adopt`` live under the same constraint and the same failure mode -- a route
+    declared after the UUID path is unreachable, and nothing but a manual smoke
+    test would say so.
+    """
+    store = await load_current_store(session, context)
+    items, total = await service.search_unified(session, context, store, q=q, limit=limit, offset=offset)
+    return Envelope(data=Page(items=items, total=total), request_id=request_id)
+
+
+@router.post(
+    "/adopt",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Envelope[ProductAdoptResponse],
+    summary="Adopt a catalogue entry into this shop and onto a shelf",
+)
+async def adopt_product(
+    payload: ProductAdoptRequest,
+    session: SessionDep,
+    context: ProductManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[ProductAdoptResponse]:
+    result = await service.adopt_catalog_product(session, context, payload, request_id=request_id)
+    return Envelope(data=result, request_id=request_id)
 
 
 @router.get("/{product_id}", response_model=Envelope[PharmacyProductResponse])

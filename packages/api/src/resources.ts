@@ -333,6 +333,8 @@ export type PharmacyApi = {
   stores: StoresClient;
   users: UsersClient;
   products: ProductsClient;
+  catalog: CatalogClient;
+  purchaseOrders: PurchaseOrdersClient;
   inventory: InventoryClient;
   purchases: PurchasesClient;
   suppliers: SuppliersClient;
@@ -355,6 +357,8 @@ export function createPharmacyApi(client: ApiClient): PharmacyApi {
     stores: createStoresClient(client),
     users: createUsersClient(client),
     products: createProductsClient(client),
+    catalog: createCatalogClient(client),
+    purchaseOrders: createPurchaseOrdersClient(client),
     inventory: createInventoryClient(client),
     purchases: createPurchasesClient(client),
     suppliers: createSuppliersClient(client),
@@ -743,6 +747,10 @@ export type ProductsClient = {
   /** Shelf list for the branch the token is pinned to, product names and barcodes included. */
   listCurrentStoreProducts(options?: RequestOptions & { includeInactive?: boolean }): Promise<Page<ShelfItem>>;
   enableStoreProduct(body: StoreProductEnableRequest, options?: RequestOptions): Promise<ApiResponse<StoreProduct>>;
+  /** Unified catalogue + shop search; every store role may call it. */
+  search(params: CatalogSearchParams, pagination?: Pagination, options?: RequestOptions): Promise<Page<CatalogSearchItem>>;
+  /** Owner/manager only: adopt a catalogue entry into the shop and onto a shelf. */
+  adopt(body: AdoptPayload, options?: RequestOptions): Promise<ApiResponse<AdoptResult>>;
 };
 
 export function createProductsClient(client: ApiClient): ProductsClient {
@@ -752,6 +760,188 @@ export function createProductsClient(client: ApiClient): ProductsClient {
     listCurrentStoreProducts: ({ includeInactive = false, ...options } = {}) =>
       client.list<ShelfItem>('/products/current', {}, { ...options, query: { ...options.query, includeInactive } }),
     enableStoreProduct: (body, options = {}) => client.post<StoreProduct>('/products/current', body, options),
+    search: ({ q }, pagination = {}, options = {}) =>
+      client.list<CatalogSearchItem>('/products/search', pagination, { ...options, query: { ...options.query, q } }),
+    adopt: (body, options = {}) => client.post<AdoptResult>('/products/adopt', body, options),
+  };
+}
+
+// --- Catalogue adoption + purchase orders ------------------------------------------
+
+/** Mirrors `CatalogSearchItemResponse`: one merged row of `GET /products/search`. */
+export type CatalogSearchItem = {
+  kind: 'catalog' | 'custom';
+  catalogProductId?: string | null;
+  pharmacyProductId?: string | null;
+  storeProductId?: string | null;
+  /** `on_shelf` needs an active shelf row at the pinned store, then `in_org`, then `absent`. */
+  shopStatus: 'on_shelf' | 'in_org' | 'absent';
+  name: string;
+  barcode?: string | null;
+  genericName?: string | null;
+  strength?: string | null;
+  dosageFormId?: string | null;
+  dosageForm?: string | null;
+  manufacturerId?: string | null;
+  manufacturer?: string | null;
+  packageSize?: string | null;
+  packageUnit?: string | null;
+  prescriptionRequired: boolean;
+  referenceUnitPrice?: string | null;
+  referenceStripPrice?: string | null;
+  salePrice?: string | null;
+  availableQuantity?: string | null;
+  sku?: string | null;
+};
+
+export type CatalogSearchParams = { q: string };
+
+export type AdoptPayload = {
+  catalogProductId: string;
+  storeId?: string;
+  sku?: string;
+  salePrice?: string;
+  minimumStock?: string;
+  rack?: string;
+};
+
+export type AdoptResult = { pharmacyProduct: PharmacyProduct; storeProduct: StoreProduct };
+
+/** Mirrors `CatalogProductResponse` for the owner's manual entry form. */
+export type CatalogProductCreateRequest = {
+  name: string;
+  genericName?: string;
+  manufacturerId?: string;
+  dosageFormId?: string;
+  strength?: string;
+  packageSize?: string;
+  packageUnit: string;
+  prescriptionRequired?: boolean;
+  countryCode: string;
+  active?: boolean;
+  unitPrice?: string;
+  stripPrice?: string;
+};
+
+export type CatalogReference = { id: string; name: string; countryCode?: string | null; active: boolean; createdAt: string };
+
+export type CatalogClient = {
+  listManufacturers(options?: RequestOptions): Promise<Page<CatalogReference>>;
+  listDosageForms(options?: RequestOptions): Promise<Page<CatalogReference>>;
+  createProduct(body: CatalogProductCreateRequest, options?: RequestOptions): Promise<ApiResponse<CatalogProductRecord>>;
+};
+
+/** Mirrors `CatalogProductResponse` (children lists omitted from the row shape). */
+export type CatalogProductRecord = {
+  id: string;
+  name: string;
+  genericName?: string | null;
+  manufacturerId?: string | null;
+  dosageFormId?: string | null;
+  strength?: string | null;
+  packageSize: string;
+  packageUnit: string;
+  prescriptionRequired: boolean;
+  countryCode: string;
+  active: boolean;
+  unitPrice?: string | null;
+  stripPrice?: string | null;
+  createdAt: string;
+};
+
+export type PurchaseOrderStatusWire = 'draft' | 'ordered' | 'closed' | 'cancelled';
+
+/** Owner/manager reference data behind the manual catalogue-entry form. */
+export function createCatalogClient(client: ApiClient): CatalogClient {
+  return {
+    listManufacturers: (options = {}) => client.list<CatalogReference>('/catalog/manufacturers', {}, options),
+    listDosageForms: (options = {}) => client.list<CatalogReference>('/catalog/dosage-forms', {}, options),
+    createProduct: (body, options = {}) => client.post<CatalogProductRecord>('/catalog/products', body, options),
+  };
+}
+
+/** Mirrors `PurchaseOrderItemResponse`. */
+export type PurchaseOrderItem = {
+  id: string;
+  purchaseOrderId: string;
+  catalogProductId?: string | null;
+  pharmacyProductId?: string | null;
+  name: string;
+  quantity: string;
+  estUnitCost?: string | null;
+};
+
+/** Mirrors `PurchaseOrderResponse`. */
+export type PurchaseOrder = {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  supplierId?: string | null;
+  status: PurchaseOrderStatusWire;
+  expectedAt?: string | null;
+  note?: string | null;
+  orderedAt?: string | null;
+  closedAt?: string | null;
+  cancelledAt?: string | null;
+  createdAt: string;
+  items: readonly PurchaseOrderItem[];
+};
+
+export type PurchaseOrderCreateRequest = {
+  supplierId?: string;
+  expectedAt?: string;
+  note?: string;
+  items?: readonly { name: string; quantity: string; estUnitCost?: string; catalogProductId?: string; pharmacyProductId?: string }[];
+};
+
+export type PurchaseOrderItemAddRequest = {
+  name: string;
+  quantity: string;
+  estUnitCost?: string;
+  catalogProductId?: string;
+  pharmacyProductId?: string;
+};
+
+export type PurchaseOrderItemUpdateRequest = { name?: string; quantity?: string; estUnitCost?: string };
+
+export type PoConvertResult = {
+  purchaseId: string;
+  purchaseOrderId: string;
+  convertedCount: number;
+  skipped: readonly { itemId: string; name: string; reason: string }[];
+};
+
+export type PurchaseOrdersClient = {
+  /** Requires an idempotency key (send one via `options.idempotencyKey`). */
+  create(body: PurchaseOrderCreateRequest, options?: RequestOptions): Promise<ApiResponse<PurchaseOrder>>;
+  list(filters?: { status?: PurchaseOrderStatusWire }, pagination?: Pagination, options?: RequestOptions): Promise<Page<PurchaseOrder>>;
+  read(poId: string, options?: RequestOptions): Promise<ApiResponse<PurchaseOrder>>;
+  addItem(poId: string, body: PurchaseOrderItemAddRequest, options?: RequestOptions): Promise<ApiResponse<PurchaseOrderItem>>;
+  updateItem(poId: string, itemId: string, body: PurchaseOrderItemUpdateRequest, options?: RequestOptions): Promise<ApiResponse<PurchaseOrderItem>>;
+  removeItem(poId: string, itemId: string, options?: RequestOptions): Promise<ApiResponse<PurchaseOrderItem>>;
+  order(poId: string, options?: RequestOptions): Promise<ApiResponse<PurchaseOrder>>;
+  close(poId: string, options?: RequestOptions): Promise<ApiResponse<PurchaseOrder>>;
+  cancel(poId: string, options?: RequestOptions): Promise<ApiResponse<PurchaseOrder>>;
+  /** Owner/manager only. Returns the created purchase draft plus lines that could not be resolved. */
+  toPurchase(poId: string, body?: { supplierId?: string }, options?: RequestOptions): Promise<ApiResponse<PoConvertResult>>;
+};
+
+export function createPurchaseOrdersClient(client: ApiClient): PurchaseOrdersClient {
+  const root = '/purchase-orders';
+  return {
+    create: (body, options = {}) => client.post<PurchaseOrder>(root, body, options),
+    list: ({ status } = {}, pagination = {}, options = {}) =>
+      client.list<PurchaseOrder>(root, pagination, { ...options, query: { ...options.query, status } }),
+    read: (poId, options = {}) => client.get<PurchaseOrder>(`${root}/${segment(poId)}`, options),
+    addItem: (poId, body, options = {}) => client.post<PurchaseOrderItem>(`${root}/${segment(poId)}/items`, body, options),
+    updateItem: (poId, itemId, body, options = {}) =>
+      client.patch<PurchaseOrderItem>(`${root}/${segment(poId)}/items/${segment(itemId)}`, body, options),
+    removeItem: (poId, itemId, options = {}) =>
+      client.delete<PurchaseOrderItem>(`${root}/${segment(poId)}/items/${segment(itemId)}`, options),
+    order: (poId, options = {}) => client.post<PurchaseOrder>(`${root}/${segment(poId)}/order`, undefined, options),
+    close: (poId, options = {}) => client.post<PurchaseOrder>(`${root}/${segment(poId)}/close`, undefined, options),
+    cancel: (poId, options = {}) => client.post<PurchaseOrder>(`${root}/${segment(poId)}/cancel`, undefined, options),
+    toPurchase: (poId, body = {}, options = {}) => client.post<PoConvertResult>(`${root}/${segment(poId)}/to-purchase`, body, options),
   };
 }
 
