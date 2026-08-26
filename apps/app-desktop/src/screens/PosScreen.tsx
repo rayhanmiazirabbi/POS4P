@@ -1,4 +1,4 @@
-import type { SaleCreateRequest } from '@pharmacy/api';
+import type { CatalogAlternativeItem, SaleCreateRequest } from '@pharmacy/api';
 import {
   calculateSaleTotals,
   formatReceiptText,
@@ -11,7 +11,20 @@ import {
 } from '@pharmacy/sales';
 import { money, multiply, type MoneyValue } from '@pharmacy/money';
 import { colors, spacing, tokens } from '@pharmacy/design-tokens';
-import { envelopeContextFor, loadShelf, matchShelf, submitShelfEntry, type ShelfProduct, type StuckEntry } from '@pharmacy/sync';
+import {
+  buildGroupedShelfView,
+  describeMedicineMatch,
+  envelopeContextFor,
+  findMedicineAlternatives,
+  highlightMedicineSpans,
+  loadShelf,
+  medicineMatchesAreFuzzy,
+  mergeMedicineAlternatives,
+  submitShelfEntry,
+  type RankedMedicine,
+  type ShelfProduct,
+  type StuckEntry,
+} from '@pharmacy/sync';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 
 import { pharmacyApi } from '../lib/api';
@@ -42,6 +55,8 @@ export function PosScreen(): ReactNode {
   const [cache, setCache] = useState<readonly ShelfProduct[]>([]);
   const [stale, setStale] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  /** The shelf row whose alternatives sub-list is open; one at a time. */
+  const [altForId, setAltForId] = useState<string | null>(null);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [cashReceived, setCashReceived] = useState('');
   const [digitalAmount, setDigitalAmount] = useState('');
@@ -99,15 +114,27 @@ export function PosScreen(): ReactNode {
     };
   }, [storeId]);
 
-  const matches = useMemo(() => {
-    // Barcode first, then exact SKU, then a substring of either the SKU or the name.
-    // The old filter read SKUs only, so a scanned barcode found nothing and a cashier
-    // who knew the medicine by name had to know its code as well.
-    if (query.trim() === '') return cache.slice(0, 8);
-    return matchShelf(cache, query)
-      .map((match) => match.product)
-      .slice(0, 8);
-  }, [cache, query]);
+  const searching = query.trim() !== '';
+  // Barcode first, then exact SKU, then a substring of either the SKU or the
+  // name, then a conservative typo guess -- capped at the eight rows this till
+  // has always shown, sliced before grouping so the counts stay honest about
+  // what is on screen. The old filter read SKUs only, so a scanned barcode
+  // found nothing and a cashier who knew the medicine by name had to know its
+  // code as well.
+  const view = useMemo(() => buildGroupedShelfView(cache, query, 8), [cache, query]);
+  const matches = view?.matches ?? [];
+  const groups = view?.groups ?? [];
+  const flatRows = view?.flatRows ?? [];
+  const rowIndex = useMemo(() => new Map(flatRows.map((entry, index) => [entry, index])), [flatRows]);
+  const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  /** Arrow traversal walks medicine rows only, never the group headings. */
+  function focusRow(index: number): void {
+    const count = flatRows.length;
+    if (count === 0) return;
+    const next = ((index % count) + count) % count;
+    rowRefs.current[next]?.focus();
+  }
 
   const saleLines = useMemo(
     () =>
@@ -343,24 +370,103 @@ export function PosScreen(): ReactNode {
           {/* Said before the first keystroke, not after the sale. On a keyboard-first
               till the cashier never looks anywhere else on the screen. */}
           {stale !== null && <p role="status" style={{ margin: 0, color: colors.warning, fontSize: tokens.typography.sizes.sm }}>{stale}</p>}
-          <input ref={searchRef} style={input} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Scan, or type a name or SKU — Enter rings up an exact match" />
+          <div style={{ display: 'flex', gap: spacing.xs, alignItems: 'center' }}>
+            <input
+              ref={searchRef}
+              style={{ ...input, flex: 1 }}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  setQuery('');
+                  event.currentTarget.focus();
+                } else if (event.key === 'ArrowDown') {
+                  event.preventDefault();
+                  focusRow(0);
+                }
+              }}
+              placeholder="Scan, or type a name or SKU — Enter rings up an exact match"
+            />
+            {query !== '' && (
+              <button type="button" style={{ ...input, cursor: 'pointer' }} aria-label="Clear search" onClick={() => setQuery('')}>✕</button>
+            )}
+          </div>
+          <p role="status" aria-live="polite" style={{ margin: 0, color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
+            {searching
+              ? matches.length === 0
+                ? 'No medicines match.'
+                : `${matches.length} medicine${matches.length === 1 ? '' : 's'} match (top 8 shown).`
+              : ''}
+          </p>
+          {searching && medicineMatchesAreFuzzy(matches) && (
+            <p role="status" style={{ margin: 0, color: colors.warning, fontSize: tokens.typography.sizes.sm }}>
+              No exact match—showing closest medicines.
+            </p>
+          )}
           <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
-            {matches.map((product) => (
-              <li key={product.id}>
-                <button type="button" style={{ ...input, width: '100%', textAlign: 'left', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: spacing.sm }} onClick={() => addToCart(product)}>
-                  {/* Name first, SKU beneath. A list of bare SKUs is a list picked
-                      from memory, which is how the wrong strength gets sold. */}
-                  <span style={{ display: 'flex', flexDirection: 'column' }}>
-                    {product.name}
-                    <span style={{ color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
-                      {product.sku}
-                      {product.rack === null ? '' : ` · ${product.rack}`}
+            {searching ? (
+              groups.map((manufacturer) => (
+                <li key={manufacturer.key}>
+                  <h3 style={{ margin: `0 0 ${spacing.xs}`, fontSize: tokens.typography.sizes.sm, color: colors.muted, fontWeight: tokens.typography.weights.semibold }}>
+                    {manufacturer.label} ({manufacturer.count})
+                  </h3>
+                  {manufacturer.dosageGroups.map((dosage) => (
+                    <div key={dosage.key} style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, paddingLeft: spacing.sm, marginBottom: spacing.xs }}>
+                      <h4 style={{ margin: 0, fontSize: tokens.typography.sizes.sm, color: colors.muted, fontWeight: tokens.typography.weights.medium }}>
+                        {dosage.label} ({dosage.items.length})
+                      </h4>
+                      {dosage.items.map((entry) => (
+                        <div key={entry.item.id} style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
+                          <MedicineRow
+                            entry={entry}
+                            index={rowIndex.get(entry) ?? 0}
+                            query={query}
+                            altAvailable={(entry.item.genericName ?? '').trim() !== ''}
+                            altOpen={altForId === entry.item.id}
+                            onToggleAlt={() => setAltForId(altForId === entry.item.id ? null : entry.item.id)}
+                            onAdd={() => addToCart(entry.item)}
+                            onFocusRow={focusRow}
+                            onEscapeToInput={() => searchRef.current?.focus()}
+                            registerRef={(node) => {
+                              const index = rowIndex.get(entry);
+                              if (index !== undefined) rowRefs.current[index] = node;
+                            }}
+                          />
+                          {altForId === entry.item.id && (
+                            <AlternativeList
+                              products={cache}
+                              target={entry.item}
+                              onAdd={(alternative) => {
+                                addToCart(alternative);
+                                setAltForId(null);
+                              }}
+                              onClose={() => setAltForId(null)}
+                            />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </li>
+              ))
+            ) : (
+              cache.slice(0, 8).map((product) => (
+                <li key={product.id}>
+                  <button type="button" style={{ ...input, width: '100%', textAlign: 'left', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: spacing.sm }} onClick={() => addToCart(product)}>
+                    {/* Name first, SKU beneath. A list of bare SKUs is a list picked
+                        from memory, which is how the wrong strength gets sold. */}
+                    <span style={{ display: 'flex', flexDirection: 'column' }}>
+                      {product.name}
+                      <span style={{ color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
+                        {product.sku}
+                        {product.rack === null ? '' : ` · ${product.rack}`}
+                      </span>
                     </span>
-                  </span>
-                  <span style={{ color: colors.muted }}>৳{product.salePrice}</span>
-                </button>
-              </li>
-            ))}
+                    <span style={{ color: colors.muted }}>৳{product.salePrice}</span>
+                  </button>
+                </li>
+              ))
+            )}
             {cache.length === 0 && (
               <li style={{ color: colors.muted }}>No shelf on this till yet — connect once to load it.</li>
             )}
@@ -493,4 +599,200 @@ export function PosScreen(): ReactNode {
 
 function lineTotal(line: CartLine): MoneyValue {
   return multiply(money(line.unitPrice), line.quantity);
+}
+
+/**
+ * One medicine row inside the grouped results. Enter on a focused row selects
+ * it; Enter in the search box keeps its scan-safe `submitShelfEntry` behavior,
+ * and the match label marks everything that is not an exact brand/barcode/SKU
+ * hit -- "Closest brand match" is a guess, and the cashier should see that.
+ */
+function MedicineRow({
+  entry,
+  index,
+  query,
+  altAvailable,
+  altOpen,
+  onToggleAlt,
+  onAdd,
+  onFocusRow,
+  onEscapeToInput,
+  registerRef,
+}: {
+  entry: RankedMedicine<ShelfProduct>;
+  index: number;
+  query: string;
+  altAvailable: boolean;
+  altOpen: boolean;
+  onToggleAlt: () => void;
+  onAdd: () => void;
+  onFocusRow: (index: number) => void;
+  onEscapeToInput: () => void;
+  registerRef: (node: HTMLButtonElement | null) => void;
+}): ReactNode {
+  const product = entry.item;
+  const meta = [product.genericName, product.strength, product.dosageForm, product.sku, product.rack]
+    .filter((part): part is string => Boolean(part))
+    .join(' · ');
+  const labelled = !(entry.matchQuality === 'exact' && entry.matchedField === 'name');
+  return (
+    <div style={{ display: 'flex', gap: spacing.xs, alignItems: 'stretch' }}>
+      <button
+        type="button"
+        ref={registerRef}
+        onClick={onAdd}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            onFocusRow(index + 1);
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            if (index === 0) onEscapeToInput();
+            else onFocusRow(index - 1);
+          } else if (event.key === 'a' && !event.altKey && !event.ctrlKey && !event.metaKey && altAvailable) {
+            // "What else is there" is one keystroke from the row it is about.
+            event.preventDefault();
+            onToggleAlt();
+          } else if (event.key === 'Escape') {
+            if (altOpen) onToggleAlt();
+            else onEscapeToInput();
+          }
+        }}
+        style={{ ...input, flex: 1, minWidth: 0, textAlign: 'left', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: spacing.sm }}
+      >
+        <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          <span>
+            {highlightMedicineSpans(product.name, query).map((span, position) =>
+              span.hit ? (
+                <mark key={position} style={{ background: 'transparent', color: colors.foreground, fontWeight: tokens.typography.weights.semibold, textDecoration: 'underline' }}>
+                  {span.text}
+                </mark>
+              ) : (
+                <span key={position}>{span.text}</span>
+              ),
+            )}
+          </span>
+          <span style={{ color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
+            {meta}
+            {labelled && <span style={{ marginLeft: spacing.sm, color: colors.warning }}>· {describeMedicineMatch(entry)}</span>}
+          </span>
+        </span>
+        <span style={{ color: colors.muted }}>৳{product.salePrice}</span>
+      </button>
+      {altAvailable && (
+        <button
+          type="button"
+          aria-label={`Alternatives to ${product.name}`}
+          aria-expanded={altOpen}
+          onClick={onToggleAlt}
+          style={{ ...input, cursor: 'pointer', fontSize: tokens.typography.sizes.sm }}
+        >
+          Alt
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The alternatives sub-list under a row: this shelf's brands of the same generic
+ * first (Enter-free tap to ring one up), then brands the shared catalogue
+ * carries that this branch does not stock, read-only.
+ *
+ * The shelf section is local computation, so it answers through any outage --
+ * which is the whole reason this till exists. The catalogue fetch is one
+ * best-effort `useEffect`: no react-query here, and a failure renders nothing
+ * rather than a banner, because the shelf answer is already on screen.
+ */
+function AlternativeList({
+  products,
+  target,
+  onAdd,
+  onClose,
+}: {
+  products: readonly ShelfProduct[];
+  target: ShelfProduct;
+  onAdd: (item: ShelfProduct) => void;
+  onClose: () => void;
+}): ReactNode {
+  const generic = target.genericName ?? '';
+  const shelfAlternatives = useMemo(() => findMedicineAlternatives(products, target), [products, target]);
+  const [catalogue, setCatalogue] = useState<readonly CatalogAlternativeItem[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    setCatalogue([]);
+    void pharmacyApi.products
+      .alternatives(
+        {
+          genericName: generic,
+          ...(target.strength ? { strength: target.strength } : {}),
+          ...(target.dosageFormId ? { dosageFormId: target.dosageFormId } : {}),
+        },
+        { limit: 20 },
+      )
+      .then((page) => {
+        if (!cancelled) setCatalogue(page.items);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [generic, target]);
+  const otherBrands = useMemo(
+    () => mergeMedicineAlternatives([target, ...shelfAlternatives.map((alt) => alt.item)], catalogue),
+    [shelfAlternatives, catalogue, target],
+  );
+
+  return (
+    <div style={{ marginLeft: spacing.md, paddingLeft: spacing.sm, borderLeft: `2px solid ${colors.border}`, display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
+      <strong style={{ fontSize: tokens.typography.sizes.sm }}>Alternatives to {target.name}</strong>
+      <span style={{ fontSize: tokens.typography.sizes.sm, color: colors.muted }}>Same generic: {generic}</span>
+      {shelfAlternatives.length === 0 ? (
+        <span style={{ fontSize: tokens.typography.sizes.sm, color: colors.muted }}>
+          No other brand of this generic on this shelf.
+        </span>
+      ) : (
+        shelfAlternatives.map((alt) => (
+          <button
+            key={alt.item.id}
+            type="button"
+            onClick={() => onAdd(alt.item)}
+            style={{ ...input, cursor: 'pointer', textAlign: 'left', display: 'flex', justifyContent: 'space-between', gap: spacing.sm }}
+          >
+            <span>
+              {alt.item.name}
+              <span style={{ color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
+                {' '}{[alt.item.strength, alt.item.manufacturer].filter((part): part is string => Boolean(part)).join(' · ')}
+              </span>
+            </span>
+            <span style={{ color: alt.sameStrength ? colors.muted : colors.warning, fontSize: tokens.typography.sizes.sm, whiteSpace: 'nowrap' }}>
+              {alt.sameStrength ? 'same strength' : `different strength${alt.item.strength ? ` (${alt.item.strength})` : ''}`} · ৳{alt.item.salePrice}
+            </span>
+          </button>
+        ))
+      )}
+      {otherBrands.length > 0 && (
+        <>
+          <span style={{ fontSize: tokens.typography.sizes.sm, color: colors.muted, fontWeight: tokens.typography.weights.semibold }}>
+            Other brands this branch does not stock
+          </span>
+          {otherBrands.map((brand) => (
+            <div key={brand.catalogProductId} style={{ display: 'flex', justifyContent: 'space-between', gap: spacing.sm, fontSize: tokens.typography.sizes.sm, color: colors.muted }}>
+              <span>
+                {brand.name}
+                {[brand.strength, brand.manufacturer].filter((part): part is string => Boolean(part)).length > 0
+                  ? ` · ${[brand.strength, brand.manufacturer].filter((part): part is string => Boolean(part)).join(' · ')}`
+                  : ''}
+                {!brand.sameStrength && ' (different strength)'}
+              </span>
+              <span>{brand.referenceUnitPrice !== null && brand.referenceUnitPrice !== undefined ? `ref ৳${brand.referenceUnitPrice}` : ''}</span>
+            </div>
+          ))}
+        </>
+      )}
+      <button type="button" style={{ ...input, cursor: 'pointer', alignSelf: 'flex-start' }} onClick={onClose}>
+        Close
+      </button>
+    </div>
+  );
 }

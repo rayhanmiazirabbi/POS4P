@@ -398,7 +398,16 @@ export type StoreProduct = {
  * bare SKUs is picking from memory, and `barcode`, because a scan has to resolve
  * on the device for the cached shelf to be worth caching.
  */
-export type ShelfItem = StoreProduct & { name: string; barcode?: string | null };
+export type ShelfItem = StoreProduct & {
+  name: string;
+  barcode?: string | null;
+  genericName?: string | null;
+  strength?: string | null;
+  manufacturerId?: string | null;
+  manufacturer?: string | null;
+  dosageFormId?: string | null;
+  dosageForm?: string | null;
+};
 
 export type SaleStatus = 'completed' | 'voided' | 'refunded';
 export type SaleChannel = 'pos' | 'online';
@@ -749,6 +758,8 @@ export type ProductsClient = {
   enableStoreProduct(body: StoreProductEnableRequest, options?: RequestOptions): Promise<ApiResponse<StoreProduct>>;
   /** Unified catalogue + shop search; every store role may call it. */
   search(params: CatalogSearchParams, pagination?: Pagination, options?: RequestOptions): Promise<Page<CatalogSearchItem>>;
+  /** Other brands of one generic, this shop's status on each; every store role may call it. */
+  alternatives(params: CatalogAlternativesParams, pagination?: Pagination, options?: RequestOptions): Promise<Page<CatalogAlternativeItem>>;
   /** Owner/manager only: adopt a catalogue entry into the shop and onto a shelf. */
   adopt(body: AdoptPayload, options?: RequestOptions): Promise<ApiResponse<AdoptResult>>;
 };
@@ -762,6 +773,11 @@ export function createProductsClient(client: ApiClient): ProductsClient {
     enableStoreProduct: (body, options = {}) => client.post<StoreProduct>('/products/current', body, options),
     search: ({ q }, pagination = {}, options = {}) =>
       client.list<CatalogSearchItem>('/products/search', pagination, { ...options, query: { ...options.query, q } }),
+    alternatives: ({ genericName, excludeCatalogProductId, strength, dosageFormId }, pagination = {}, options = {}) =>
+      client.list<CatalogAlternativeItem>('/products/alternatives', pagination, {
+        ...options,
+        query: { ...options.query, genericName, excludeCatalogProductId, strength, dosageFormId },
+      }),
     adopt: (body, options = {}) => client.post<AdoptResult>('/products/adopt', body, options),
   };
 }
@@ -792,9 +808,47 @@ export type CatalogSearchItem = {
   salePrice?: string | null;
   availableQuantity?: string | null;
   sku?: string | null;
+  matchedField: 'barcode' | 'sku' | 'name' | 'genericName' | 'alias' | 'strength' | 'dosageForm';
+  matchQuality: 'exact' | 'partial' | 'fuzzy' | 'supporting';
+  matchedText: string;
+  matchScore: number;
 };
 
 export type CatalogSearchParams = { q: string };
+
+/** Mirrors `CatalogAlternativeItemResponse`: one row of `GET /products/alternatives`. */
+export type CatalogAlternativeItem = {
+  catalogProductId: string;
+  pharmacyProductId?: string | null;
+  storeProductId?: string | null;
+  shopStatus: 'on_shelf' | 'in_org' | 'absent';
+  name: string;
+  genericName?: string | null;
+  strength?: string | null;
+  dosageFormId?: string | null;
+  dosageForm?: string | null;
+  manufacturerId?: string | null;
+  manufacturer?: string | null;
+  packageSize?: string | null;
+  packageUnit?: string | null;
+  prescriptionRequired: boolean;
+  referenceUnitPrice?: string | null;
+  referenceStripPrice?: string | null;
+  salePrice?: string | null;
+  availableQuantity?: string | null;
+  sku?: string | null;
+  /** Relative to the row that was asked about: strength/form equality, never a filter. */
+  sameStrength: boolean;
+  sameDosageForm: boolean;
+};
+
+export type CatalogAlternativesParams = {
+  genericName: string;
+  /** Drops the catalogue row the caller is already looking at. */
+  excludeCatalogProductId?: string;
+  strength?: string;
+  dosageFormId?: string;
+};
 
 export type AdoptPayload = {
   catalogProductId: string;

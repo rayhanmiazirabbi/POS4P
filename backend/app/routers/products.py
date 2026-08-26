@@ -10,6 +10,7 @@ from app.dependencies import ContextDep, RequestIdDep, SessionDep, require_roles
 from app.models import Role
 from app.schemas.base import Envelope, Page
 from app.schemas.products import (
+    CatalogAlternativeItemResponse,
     CatalogSearchItemResponse,
     PharmacyProductCreateRequest,
     PharmacyProductResponse,
@@ -96,9 +97,15 @@ async def list_current_store_products(
                 **StoreProductResponse.model_validate(shelf_row).model_dump(),
                 "name": product.name,
                 "barcode": product.barcode,
+                "generic_name": catalog.generic_name if catalog is not None else None,
+                "strength": catalog.strength if catalog is not None else None,
+                "dosage_form_id": catalog.dosage_form_id if catalog is not None else None,
+                "dosage_form": dosage.name if dosage is not None else None,
+                "manufacturer_id": catalog.manufacturer_id if catalog is not None else None,
+                "manufacturer": manufacturer.name if manufacturer is not None else None,
             }
         )
-        for shelf_row, product in rows
+        for shelf_row, product, catalog, manufacturer, dosage in rows
     ]
     return Envelope(data=Page(items=items, total=len(items)), request_id=request_id)
 
@@ -148,6 +155,45 @@ async def search_products_unified(
     """
     store = await load_current_store(session, context)
     items, total = await service.search_unified(session, context, store, q=q, limit=limit, offset=offset)
+    return Envelope(data=Page(items=items, total=total), request_id=request_id)
+
+
+@router.get(
+    "/alternatives",
+    response_model=Envelope[Page[CatalogAlternativeItemResponse]],
+    summary="Other brands of the same generic",
+)
+async def list_product_alternatives(
+    session: SessionDep,
+    context: ContextDep,
+    request_id: RequestIdDep,
+    genericName: Annotated[str, Query(min_length=1, max_length=512)],
+    excludeCatalogProductId: Annotated[UUID | None, Query()] = None,
+    strength: Annotated[str | None, Query(max_length=512)] = None,
+    dosageFormId: Annotated[UUID | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Envelope[Page[CatalogAlternativeItemResponse]]:
+    """Alternatives to one medicine: every brand of its generic, this shop first.
+
+    **Declared before ``/{product_id}``, like ``/current`` and ``/search`` above
+    it.** Keyed by the generic name rather than a product id because the caller
+    is usually holding a shelf row, and this router's ``{product_id}`` is a
+    *pharmacy* product id while the catalogue page holds *catalogue* ids -- a
+    path parameter would accept either and silently mean the wrong one.
+    """
+    store = await load_current_store(session, context)
+    items, total = await service.find_catalog_alternatives(
+        session,
+        context,
+        store,
+        generic_name=genericName,
+        exclude_catalog_product_id=excludeCatalogProductId,
+        strength=strength,
+        dosage_form_id=dosageFormId,
+        limit=limit,
+        offset=offset,
+    )
     return Envelope(data=Page(items=items, total=total), request_id=request_id)
 
 

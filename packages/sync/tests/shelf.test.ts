@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  buildGroupedShelfView,
   createShelfStore,
   describeShelfAge,
+  groupShelfMatches,
   loadShelf,
   matchShelf,
   readShelf,
@@ -89,7 +91,23 @@ describe('toShelfProduct', () => {
       barcode: null,
       salePrice: '12.00',
       rack: null,
+      genericName: null,
+      strength: null,
+      manufacturerId: null,
+      manufacturer: null,
+      dosageFormId: null,
+      dosageForm: null,
     });
+  });
+
+  it('carries the catalogue identity fields onto the shelf row', () => {
+    expect(
+      toShelfProduct({
+        id: 'p-2', sku: 'NAPA-500', name: 'Napa', salePrice: '12.00',
+        genericName: 'Paracetamol', strength: '500 mg',
+        manufacturerId: 'm-1', manufacturer: 'Beximco', dosageFormId: 'f-1', dosageForm: 'Tablet',
+      }),
+    ).toMatchObject({ genericName: 'Paracetamol', strength: '500 mg', manufacturer: 'Beximco', dosageForm: 'Tablet' });
   });
 });
 
@@ -117,7 +135,32 @@ describe('createShelfStore', () => {
 
     const read = await store.read(mirpur);
     expect(read.status === 'cached' && read.products).toEqual([
-      { id: 'p-PARA-500', sku: 'PARA-500', name: 'Medicine PARA-500', barcode: null, salePrice: '14.00', rack: null },
+      {
+        id: 'p-PARA-500', sku: 'PARA-500', name: 'Medicine PARA-500', barcode: null, salePrice: '14.00', rack: null,
+        genericName: null, strength: null, manufacturerId: null, manufacturer: null, dosageFormId: null, dosageForm: null,
+      },
+    ]);
+  });
+
+  it('still reads a shelf cached before rows carried catalogue identity', async () => {
+    // A `shelf_v1` blob written before this feature has no generic/manufacturer
+    // fields at all. It must keep selling: the rows fall into the unclassified
+    // groups until the next successful refresh brings the metadata in.
+    const storage = memoryStorage(
+      JSON.stringify({
+        storeId: mirpur,
+        fetchedAt: '2026-01-01T09:00:00.000Z',
+        products: [
+          { id: 'p-1', sku: 'PARA-500', name: 'Paracetamol 500mg', barcode: '8901234567890', salePrice: '12.00', rack: 'A1' },
+        ],
+      }),
+    );
+    const read = await createShelfStore(storage).read(mirpur);
+    expect(read.status === 'cached' && read.products).toEqual([
+      {
+        id: 'p-1', sku: 'PARA-500', name: 'Paracetamol 500mg', barcode: '8901234567890', salePrice: '12.00', rack: 'A1',
+        genericName: null, strength: null, manufacturerId: null, manufacturer: null, dosageFormId: null, dosageForm: null,
+      },
     ]);
   });
 
@@ -336,6 +379,85 @@ describe('matchShelf', () => {
     // `OMEP-20` has no barcode. A null compared against a normalised query must not
     // collapse to equal, or every scan of an unknown code would ring it up.
     expect(matchShelf(counter, '9999999999999')).toEqual([]);
+  });
+
+  it('finds a shelf row through a one-letter typo', () => {
+    // The counter's whole question: the customer said "napa", the cashier heard
+    // "npa". A conservative fuzzy match surfaces the row and the screen labels
+    // it a guess rather than a confirmed hit.
+    const shelf = [toShelfProduct({ id: 'p-n', sku: 'NAPA-500', name: 'Napa', salePrice: '12.00' })];
+    const [hit] = matchShelf(shelf, 'npa');
+    expect(hit?.matchedBy).toBe('name');
+    expect(hit?.matchQuality).toBe('fuzzy');
+  });
+
+  it('reports the metadata a grouped shelf needs', () => {
+    const [hit] = matchShelf(counter, 'PARA-500');
+    expect(hit?.matchedBy).toBe('sku');
+    expect(hit?.matchQuality).toBe('exact');
+    expect(hit?.matchedText).toBe('PARA-500');
+    expect(hit?.matchScore).toBe(1);
+    expect(hit?.rank).toBe(1);
+  });
+
+  it('never fuzzy-guesses on a two-letter query', () => {
+    // A short prefix is a partial match and stays; a two-letter *guess* is not
+    // allowed -- the edit budget below three characters is zero, so nothing
+    // look-alike sneaks in beside the literal prefix.
+    const shelf = [toShelfProduct({ id: 'p-n', sku: 'X-1', name: 'Napa', salePrice: '12.00' })];
+    expect(matchShelf(shelf, 'yx')).toEqual([]);
+    expect(matchShelf(shelf, 'na')[0]?.matchQuality).toBe('partial');
+  });
+});
+
+describe('groupShelfMatches', () => {
+  const catalogued: readonly ShelfProduct[] = [
+    toShelfProduct({ id: 'p-1', sku: 'NAPA-500', name: 'Napa', salePrice: '12.00', manufacturerId: 'm-1', manufacturer: 'Beximco', dosageFormId: 'f-1', dosageForm: 'Tablet', genericName: 'Paracetamol', strength: '500 mg' }),
+    toShelfProduct({ id: 'p-2', sku: 'NAPA-SYR', name: 'Napa Syrup', salePrice: '30.00', manufacturerId: 'm-1', manufacturer: 'Beximco', dosageFormId: 'f-2', dosageForm: 'Syrup' }),
+    toShelfProduct({ id: 'p-3', sku: 'ACE-500', name: 'Ace', salePrice: '10.00', manufacturerId: 'm-2', manufacturer: 'Square', dosageFormId: 'f-1', dosageForm: 'Tablet', genericName: 'Paracetamol', strength: '500 mg' }),
+  ];
+
+  it('groups a generic-name query by manufacturer, then dosage form, best match first', () => {
+    // "paracetamol" hits Napa (brand-adjacent rows carry the generic) and Ace;
+    // Beximco leads because its exact generic match outranks Square's.
+    const groups = groupShelfMatches(matchShelf(catalogued, 'paracetamol'));
+    expect(groups.map((group) => group.label)).toEqual(['Beximco', 'Square']);
+    expect(groups[0]!.count).toBe(1);
+    expect(groups[0]!.dosageGroups.map((group) => group.label)).toEqual(['Tablet']);
+  });
+
+  it('sends rows cached without metadata to the unclassified groups', () => {
+    // A `shelf_v1` cache: no manufacturer, no dosage form. The match still shows,
+    // under the plain fallback headings, until the next refresh.
+    const legacy = [toShelfProduct({ id: 'p-9', sku: 'MED-1', name: 'Paracetamol', salePrice: '5.00' })];
+    const groups = groupShelfMatches(matchShelf(legacy, 'paracetamol'));
+    expect(groups[0]!.label).toBe('Custom / manufacturer not set');
+    expect(groups[0]!.dosageGroups[0]!.label).toBe('Dosage form not set');
+    expect(groups[0]!.dosageGroups[0]!.items.map((item) => item.item.sku)).toEqual(['MED-1']);
+  });
+});
+
+describe('buildGroupedShelfView', () => {
+  const catalogued: readonly ShelfProduct[] = [
+    toShelfProduct({ id: 'p-1', sku: 'NAPA-500', name: 'Napa', salePrice: '12.00', manufacturerId: 'm-1', manufacturer: 'Beximco', dosageFormId: 'f-1', dosageForm: 'Tablet', genericName: 'Paracetamol' }),
+    toShelfProduct({ id: 'p-2', sku: 'NAPA-SYR', name: 'Napa Syrup', salePrice: '30.00', manufacturerId: 'm-1', manufacturer: 'Beximco', dosageFormId: 'f-2', dosageForm: 'Syrup' }),
+    toShelfProduct({ id: 'p-3', sku: 'ACE-500', name: 'Ace Syrup', salePrice: '10.00', manufacturerId: 'm-2', manufacturer: 'Square', dosageFormId: 'f-2', dosageForm: 'Syrup' }),
+  ];
+
+  it('answers null for a blank query so the shell keeps its plain shelf list', () => {
+    expect(buildGroupedShelfView(catalogued, '   ')).toBeNull();
+  });
+
+  it('flattens the grouped rows in ranked order for arrow traversal', () => {
+    const view = buildGroupedShelfView(catalogued, 'napa');
+    expect(view!.flatRows.map((entry) => entry.item.sku)).toEqual(['NAPA-500', 'NAPA-SYR']);
+  });
+
+  it('slices matches before grouping so a cap keeps counts honest', () => {
+    const view = buildGroupedShelfView(catalogued, 'syrup', 1);
+    expect(view!.matches).toHaveLength(1);
+    expect(view!.flatRows).toHaveLength(1);
+    expect(view!.groups[0]!.count).toBe(1);
   });
 });
 

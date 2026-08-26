@@ -162,6 +162,8 @@ export type {
   UsersClient,
 } from './resources';
 export type {
+  CatalogAlternativeItem,
+  CatalogAlternativesParams,
   CatalogClient,
   CatalogProductCreateRequest,
   CatalogProductRecord,

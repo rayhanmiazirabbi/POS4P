@@ -120,6 +120,12 @@ class ShelfItemResponse(StoreProductResponse):
 
     name: str
     barcode: str | None
+    generic_name: str | None = None
+    strength: str | None = None
+    dosage_form_id: UUID | None = None
+    dosage_form: str | None = None
+    manufacturer_id: UUID | None = None
+    manufacturer: str | None = None
 
 
 class StoreProductPriceResponse(ApiModel):
@@ -160,6 +166,44 @@ class CatalogSearchItemResponse(ApiModel):
     sale_price: Decimal | None = None
     available_quantity: Decimal | None = None
     sku: str | None = None
+    matched_field: Literal["barcode", "sku", "name", "genericName", "alias", "strength", "dosageForm"]
+    match_quality: Literal["exact", "partial", "fuzzy", "supporting"]
+    matched_text: str
+    match_score: float = Field(ge=0, le=1)
+
+
+class CatalogAlternativeItemResponse(ApiModel):
+    """One row of ``GET /products/alternatives``: another brand of the same generic.
+
+    The search row minus everything a query earned (``kind``, ``barcode``, the
+    ``matched_*`` metadata) plus what an alternative is *relative to* -- the
+    asked-about row's strength and dosage form, so a screen can lead with the
+    like-for-like swap and label the rest. Only catalogue rows appear: an org
+    product with no catalogue link has no generic name to match on, so it is
+    invisible to this comparison by construction rather than by filter.
+    """
+
+    catalog_product_id: UUID
+    pharmacy_product_id: UUID | None = None
+    store_product_id: UUID | None = None
+    shop_status: Literal["on_shelf", "in_org", "absent"] = "absent"
+    name: str
+    generic_name: str | None = None
+    strength: str | None = None
+    dosage_form_id: UUID | None = None
+    dosage_form: str | None = None
+    manufacturer_id: UUID | None = None
+    manufacturer: str | None = None
+    package_size: Decimal | None = None
+    package_unit: str | None = None
+    prescription_required: bool = False
+    reference_unit_price: Decimal | None = None
+    reference_strip_price: Decimal | None = None
+    sale_price: Decimal | None = None
+    available_quantity: Decimal | None = None
+    sku: str | None = None
+    same_strength: bool = False
+    same_dosage_form: bool = False
 
 
 class ProductAdoptRequest(ApiModel):

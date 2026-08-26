@@ -243,3 +243,28 @@ describe('InventoryClient', () => {
     expect(calls[1]?.path).toBe('/inventory/expiring?storeId=store-1&withinDays=14');
   });
 });
+
+describe('ProductsClient', () => {
+  it('sends the generic and its ranking context to the alternatives route', async () => {
+    // The route is keyed by the generic string, not a product id: the caller is
+    // usually holding a shelf row, and the shelf carries no catalogue id.
+    const { transport, calls } = capturingTransport(() => ({ data: [], requestId: 'request-1' }));
+    const api = createPharmacyApi(new ApiClient(transport, createMemoryStorage()));
+    await api.products.alternatives({
+      genericName: 'Paracetamol + Caffeine',
+      excludeCatalogProductId: 'cat-1',
+      strength: '500 mg',
+      dosageFormId: 'df-1',
+    });
+    expect(calls[0]?.path).toBe(
+      '/products/alternatives?genericName=Paracetamol+%2B+Caffeine&excludeCatalogProductId=cat-1&strength=500+mg&dosageFormId=df-1',
+    );
+  });
+
+  it('drops the optional context the caller does not have', async () => {
+    const { transport, calls } = capturingTransport(() => ({ data: [], requestId: 'request-1' }));
+    const api = createPharmacyApi(new ApiClient(transport, createMemoryStorage()));
+    await api.products.alternatives({ genericName: 'Cetirizine' });
+    expect(calls[0]?.path).toBe('/products/alternatives?genericName=Cetirizine');
+  });
+});

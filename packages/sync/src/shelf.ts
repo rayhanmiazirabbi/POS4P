@@ -1,6 +1,7 @@
 import { normalizeBarcode } from '@pharmacy/core';
 
 import type { OutboxStorage } from './outbox';
+import { groupMedicineMatches, matchMedicineText, type MedicineManufacturerGroup, type MedicineMatchQuality, type RankedMedicine } from './medicineSearch';
 
 /**
  * The shelf, kept on the device so a counter can still sell without a network.
@@ -26,6 +27,12 @@ export type ShelfProduct = {
   /** Decimal serialized as a fixed-cents string, matching `StoreProduct.salePrice`. */
   salePrice: string;
   rack: string | null;
+  genericName?: string | null;
+  strength?: string | null;
+  manufacturerId?: string | null;
+  manufacturer?: string | null;
+  dosageFormId?: string | null;
+  dosageForm?: string | null;
 };
 
 /**
@@ -52,7 +59,12 @@ export type ShelfCache = {
  * invert that. A `StoreProduct` satisfies this shape as it stands, so callers pass
  * the API rows straight through.
  */
-export type ShelfSource = { id: string; sku: string; name: string; salePrice: string; barcode?: string | null; rack?: string | null };
+export type ShelfSource = {
+  id: string; sku: string; name: string; salePrice: string;
+  barcode?: string | null; rack?: string | null; genericName?: string | null;
+  strength?: string | null; manufacturerId?: string | null; manufacturer?: string | null;
+  dosageFormId?: string | null; dosageForm?: string | null;
+};
 
 /** Narrowed from the API row, dropping what a cart does not need. */
 export function toShelfProduct(product: ShelfSource): ShelfProduct {
@@ -63,6 +75,12 @@ export function toShelfProduct(product: ShelfSource): ShelfProduct {
     barcode: product.barcode ?? null,
     salePrice: product.salePrice,
     rack: product.rack ?? null,
+    genericName: product.genericName ?? null,
+    strength: product.strength ?? null,
+    manufacturerId: product.manufacturerId ?? null,
+    manufacturer: product.manufacturer ?? null,
+    dosageFormId: product.dosageFormId ?? null,
+    dosageForm: product.dosageForm ?? null,
   };
 }
 
@@ -98,7 +116,7 @@ function decode(raw: string | null): ShelfCache | null {
   const row = parsed as Record<string, unknown>;
   if (typeof row.storeId !== 'string' || row.storeId === '' || typeof row.fetchedAt !== 'string') return null;
   if (!Array.isArray(row.products) || !row.products.every(isShelfProduct)) return null;
-  return { storeId: row.storeId, fetchedAt: row.fetchedAt, products: row.products };
+  return { storeId: row.storeId, fetchedAt: row.fetchedAt, products: row.products.map((product) => toShelfProduct(product as ShelfSource)) };
 }
 
 /** How a shell reads the shelf it has, and how stale it is. */
@@ -264,9 +282,16 @@ export async function loadShelf(
  * others are a cashier's guess narrowed down, and adding the top guess without
  * showing it is how the wrong strength of the right medicine gets sold.
  */
-export type ShelfMatchKind = 'barcode' | 'sku' | 'name';
+export type ShelfMatchKind = 'barcode' | 'sku' | 'name' | 'genericName' | 'alias' | 'strength' | 'dosageForm';
 
-export type ShelfMatch = { product: ShelfProduct; matchedBy: ShelfMatchKind };
+export type ShelfMatch = {
+  product: ShelfProduct;
+  matchedBy: ShelfMatchKind;
+  matchQuality: MedicineMatchQuality;
+  matchedText: string;
+  matchScore: number;
+  rank: number;
+};
 
 /**
  * Find shelf rows for something typed, scanned, or read by a camera.
@@ -292,23 +317,64 @@ export function matchShelf(products: readonly ShelfProduct[], query: string): Sh
     // Compared normalized on both sides: some scanners emit a trailing space and
     // some catalogues are keyed in with the group separators left in.
     if (product.barcode !== null && normalizeBarcode(product.barcode) === scanned) {
-      matches.push({ product, matchedBy: 'barcode' });
+      matches.push({ product, matchedBy: 'barcode', matchQuality: 'exact', matchedText: product.barcode, matchScore: 1, rank: 0 });
       continue;
     }
     const sku = product.sku.toLocaleLowerCase();
     if (sku === needle) {
-      matches.push({ product, matchedBy: 'sku' });
+      matches.push({ product, matchedBy: 'sku', matchQuality: 'exact', matchedText: product.sku, matchScore: 1, rank: 1 });
       continue;
     }
-    if (sku.includes(needle) || product.name.toLocaleLowerCase().includes(needle)) {
-      matches.push({ product, matchedBy: 'name' });
+    const textMatch = matchMedicineText(product, raw);
+    if (textMatch !== null) {
+      matches.push({ product, matchedBy: textMatch.matchedField, ...textMatch });
+      continue;
+    }
+    if (sku.includes(needle)) {
+      matches.push({ product, matchedBy: 'sku', matchQuality: 'partial', matchedText: product.sku, matchScore: needle.length / sku.length, rank: 7 });
     }
   }
 
-  const rank: Record<ShelfMatchKind, number> = { barcode: 0, sku: 1, name: 2 };
   return matches.sort(
-    (a, b) => rank[a.matchedBy] - rank[b.matchedBy] || a.product.name.localeCompare(b.product.name),
+    (a, b) => a.rank - b.rank || b.matchScore - a.matchScore || a.product.name.localeCompare(b.product.name),
   );
+}
+
+export function groupShelfMatches(matches: readonly ShelfMatch[]): readonly MedicineManufacturerGroup<ShelfProduct>[] {
+  return groupMedicineMatches(matches.map((match) => ({
+    item: match.product,
+    matchedField: match.matchedBy === 'sku' || match.matchedBy === 'barcode' ? 'name' : match.matchedBy,
+    matchQuality: match.matchQuality,
+    matchedText: match.matchedText,
+    matchScore: match.matchScore,
+    rank: match.rank,
+  })));
+}
+
+/** What a counter renders for an active query: groups, rows in order, matches. */
+export type GroupedShelfView = {
+  matches: readonly ShelfMatch[];
+  groups: readonly MedicineManufacturerGroup<ShelfProduct>[];
+  flatRows: readonly RankedMedicine<ShelfProduct>[];
+};
+
+/**
+ * Build the grouped view of an active search: manufacturer -> dosage-form
+ * groups, plus the rows flattened in ranked order for arrow-key traversal.
+ * `null` when no query is active -- the untouched box keeps each shell's
+ * existing blank-shelf presentation, and a cap preserves a shell's existing
+ * result limit by slicing the matches before they are grouped.
+ */
+export function buildGroupedShelfView(
+  products: readonly ShelfProduct[],
+  query: string,
+  cap?: number,
+): GroupedShelfView | null {
+  if (query.trim() === '') return null;
+  const matches = cap === undefined ? matchShelf(products, query) : matchShelf(products, query).slice(0, cap);
+  const groups = groupShelfMatches(matches);
+  const flatRows = groups.flatMap((manufacturer) => manufacturer.dosageGroups.flatMap((dosage) => dosage.items));
+  return { matches, groups, flatRows };
 }
 
 /** What a scan resolved to, and whether the counter may act on it without asking. */
@@ -362,7 +428,7 @@ export function scanShelf(products: readonly ShelfProduct[], scanned: string): S
 export function submitShelfEntry(products: readonly ShelfProduct[], entry: string): ShelfScan {
   const scan = scanShelf(products, entry);
   if (scan.status === 'product') return scan;
-  const skus = matchShelf(products, entry).filter((match) => match.matchedBy === 'sku');
+  const skus = matchShelf(products, entry).filter((match) => match.matchedBy === 'sku' && match.matchQuality === 'exact');
   const sole = skus.length === 1 ? skus[0] : undefined;
   return sole === undefined ? scan : { status: 'product', product: sole.product };
 }

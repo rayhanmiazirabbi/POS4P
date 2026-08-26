@@ -240,14 +240,17 @@ export {
 } from './outbox';
 
 export {
+  buildGroupedShelfView,
   createShelfStore,
   describeShelfAge,
+  groupShelfMatches,
   loadShelf,
   matchShelf,
   readShelf,
   scanShelf,
   submitShelfEntry,
   toShelfProduct,
+  type GroupedShelfView,
   type ShelfCache,
   type ShelfLoad,
   type ShelfMatch,
@@ -258,3 +261,30 @@ export {
   type ShelfSource,
   type ShelfStore,
 } from './shelf';
+
+export {
+  findMedicineAlternatives,
+  mergeMedicineAlternatives,
+  type CatalogAlternativeLike,
+  type MedicineAlternative,
+  type MedicineAlternativeSource,
+} from './medicineAlternatives';
+
+export {
+  describeMedicineMatch,
+  groupMedicineMatches,
+  highlightMedicineSpans,
+  matchMedicineText,
+  medicineEditDistance,
+  medicineMatchRank,
+  medicineMatchesAreFuzzy,
+  normalizeMedicineText,
+  type HighlightSpan,
+  type MedicineDosageGroup,
+  type MedicineManufacturerGroup,
+  type MedicineMatchField,
+  type MedicineMatchQuality,
+  type MedicineSearchValue,
+  type MedicineTextMatch,
+  type RankedMedicine,
+} from './medicineSearch';

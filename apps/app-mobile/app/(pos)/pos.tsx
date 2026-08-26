@@ -1,4 +1,4 @@
-import type { Customer, SaleCreateRequest } from '@pharmacy/api';
+import type { CatalogAlternativeItem, Customer, SaleCreateRequest } from '@pharmacy/api';
 import {
   calculateSaleTotals,
   formatReceiptText,
@@ -10,14 +10,25 @@ import {
   wirePayments,
   type Receipt,
 } from '@pharmacy/sales';
-import { loadShelf, matchShelf, scanShelf, submitShelfEntry, type ShelfProduct } from '@pharmacy/sync';
+import {
+  describeMedicineMatch,
+  findMedicineAlternatives,
+  highlightMedicineSpans,
+  loadShelf,
+  medicineMatchesAreFuzzy,
+  mergeMedicineAlternatives,
+  scanShelf,
+  submitShelfEntry,
+  type ShelfProduct,
+} from '@pharmacy/sync';
 import { money, multiply } from '@pharmacy/money';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link } from 'expo-router';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
-import { ActivityIndicator, Button, FlatList, Pressable, Share, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Button, FlatList, Modal, Pressable, ScrollView, Share, Text, TextInput, View } from 'react-native';
 
 import { pharmacyApi } from '../../src/lib/api';
+import { buildMedicineListEntries } from '../../src/lib/medicineList';
 import { RequireCapability } from '../../src/lib/guard';
 import { envelopeContext, newIdempotencyKey, queueSale, queueStatus, recoverOutbox } from '../../src/lib/offlineSales';
 import { CameraView, nativeScanner, scannerFormats, type ScannerPermission } from '../../src/platform';
@@ -40,6 +51,8 @@ function PosCounter(): ReactNode {
   const [stale, setStale] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [scanning, setScanning] = useState(false);
+  /** The shelf row whose alternatives sheet is open, or none. */
+  const [altFor, setAltFor] = useState<ShelfProduct | null>(null);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [customerId, setCustomerId] = useState<string | null>(null);
   const [customerName, setCustomerName] = useState<string | null>(null);
@@ -122,14 +135,16 @@ function PosCounter(): ReactNode {
     return paintedCache !== null && paintedCache.storeId === storeId ? paintedCache.products : [];
   }, [shelfQuery.data, paintedCache, storeId]);
 
-  const filtered = useMemo(() => {
-    // The search box is also the scanner input, so one matcher answers both: a
-    // barcode ranks above an exact SKU, which ranks above a substring of either the
-    // SKU or the name. It used to be `sku.includes(needle)`, which meant a cashier
-    // told "omeprazole" had to already know the SKU to find `OMEP-20`.
-    if (query.trim() === '') return products;
-    return matchShelf(products, query).map((match) => match.product);
-  }, [products, query]);
+  const searching = query.trim() !== '';
+  // The search box is also the scanner input, so one matcher answers both: a
+  // barcode ranks above an exact SKU, which ranks above a substring of either
+  // the SKU or the name -- and now a conservative typo guess below both.
+  // Grouping only while a query is active: the untouched box keeps the plain
+  // shelf list this screen has always shown between customers.
+  const { entries: listData, matches } = useMemo(
+    () => buildMedicineListEntries(products, query),
+    [products, query],
+  );
 
   const saleLines = useMemo(
     () =>
@@ -386,6 +401,15 @@ function PosCounter(): ReactNode {
           onSubmitEditing={() => submit(query)}
           style={[input, { flex: 1 }]}
         />
+        {query !== '' && (
+          <Button
+            title="✕"
+            accessibilityLabel="Clear search"
+            onPress={() => {
+              setQuery('');
+            }}
+          />
+        )}
         <Button title="Scan" onPress={() => void openScanner()} />
         <Link href="/(pos)/sync" style={{ color: pending > 0 ? '#A16207' : '#0F766E' }}>
           {pending > 0 ? `${pending} queued` : 'Sync ✓'}
@@ -396,27 +420,85 @@ function PosCounter(): ReactNode {
           three-day-old price list should know that is what they are reading. */}
       {stale !== null && <Text style={{ color: '#A16207' }}>{stale}</Text>}
 
+      {/* Announced for screen readers as the list changes, matching the web and
+          desktop counters' live regions. */}
+      <Text accessibilityLiveRegion="polite" style={{ color: '#64748B', fontSize: 12 }}>
+        {searching
+          ? matches.length === 0
+            ? 'No medicines match.'
+            : `${matches.length} medicine${matches.length === 1 ? '' : 's'} match.`
+          : ''}
+      </Text>
+      {searching && medicineMatchesAreFuzzy(matches) && (
+        <Text style={{ color: '#A16207', fontSize: 12 }}>No exact match—showing closest medicines.</Text>
+      )}
+
       <FlatList
-        data={filtered}
-        keyExtractor={(product) => product.id}
+        data={listData}
+        keyExtractor={(item) =>
+          item.kind === 'row' ? `row-${item.product.id}` : `${item.kind}-${item.label}`
+        }
         style={{ flex: 1 }}
-        renderItem={({ item }) => (
-          <Pressable
-            onPress={() => addToCart(item)}
-            style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12, borderRadius: 8, backgroundColor: '#FFFFFF', marginBottom: 4 }}
-          >
-            {/* Name first, SKU under it. A list of bare SKUs is a list picked from
-                memory, which is how the wrong strength gets sold. */}
-            <View style={{ flex: 1 }}>
-              <Text>{item.name}</Text>
-              <Text style={{ color: '#64748B', fontSize: 12 }}>
-                {item.sku}
-                {item.rack === null ? '' : ` · ${item.rack}`}
+        renderItem={({ item }) => {
+          if (item.kind === 'manufacturer' || item.kind === 'dosage') {
+            return (
+              <Text
+                style={{
+                  color: '#64748B',
+                  fontSize: item.kind === 'manufacturer' ? 13 : 12,
+                  fontWeight: item.kind === 'manufacturer' ? '700' : '500',
+                  marginTop: 8,
+                  marginBottom: 4,
+                  paddingLeft: item.kind === 'dosage' ? 8 : 0,
+                }}
+              >
+                {item.label} ({item.count})
               </Text>
-            </View>
-            <Text style={{ color: '#64748B' }}>৳{item.salePrice}</Text>
-          </Pressable>
-        )}
+            );
+          }
+          const { product, row } = item;
+          const meta = [product.genericName, product.strength, product.dosageForm, product.sku, product.rack]
+            .filter((part): part is string => Boolean(part))
+            .join(' · ');
+          const labelled = row !== null && !(row.matchQuality === 'exact' && row.matchedField === 'name');
+          return (
+            <Pressable
+              onPress={() => addToCart(product)}
+              onLongPress={() => {
+                // The swap question needs the gesture to stay out of the way of
+                // the tap that sells: long-press asks "what else is there".
+                if ((product.genericName ?? '').trim() !== '') setAltFor(product);
+              }}
+              accessibilityHint="Long-press for alternative brands of the same generic"
+              style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12, borderRadius: 8, backgroundColor: '#FFFFFF', marginBottom: 4 }}
+            >
+              {/* Name first, identity under it. A list of bare SKUs is a list
+                  picked from memory, which is how the wrong strength gets sold. */}
+              <View style={{ flex: 1 }}>
+                <Text>
+                  {row === null
+                    ? product.name
+                    : highlightMedicineSpans(product.name, query).map((span, position) =>
+                        span.hit ? (
+                          <Text key={position} style={{ fontWeight: '700', textDecorationLine: 'underline' }}>
+                            {span.text}
+                          </Text>
+                        ) : (
+                          <Text key={position}>{span.text}</Text>
+                        ),
+                      )}
+                </Text>
+                <Text style={{ color: '#64748B', fontSize: 12 }}>
+                  {meta}
+                  {labelled && row !== null && (
+                    <Text style={{ color: '#A16207' }}>{` · ${describeMedicineMatch(row)}`}</Text>
+                  )}
+                </Text>
+              </View>
+              <Text style={{ color: '#64748B' }}>৳{product.salePrice}</Text>
+            </Pressable>
+          );
+        }}
         ListEmptyComponent={
           <Text style={{ color: '#64748B' }}>
             {products.length === 0 ? 'No shelf on this phone yet — connect once to load it.' : 'No products match.'}
@@ -553,7 +635,116 @@ function PosCounter(): ReactNode {
           </View>
         </View>
       )}
+
+      {altFor !== null && (
+        <AlternativesModal
+          products={products}
+          target={altFor}
+          onAdd={(alternative) => {
+            addToCart(alternative);
+            setAltFor(null);
+          }}
+          onClose={() => setAltFor(null)}
+        />
+      )}
     </View>
+  );
+}
+
+/**
+ * The alternatives sheet: this shelf's brands of the same generic first, tap to
+ * ring one up, then brands the shared catalogue carries that this branch does
+ * not stock, read-only.
+ *
+ * The shelf section is local computation and answers offline -- the phone is
+ * the counter most likely to be off-network. The catalogue section is one
+ * best-effort query (`retry: false`): a failure renders nothing rather than an
+ * error, because the shelf answer is already on screen and mid-sale is no time
+ * to report that a reference list is unreachable.
+ */
+function AlternativesModal({
+  products,
+  target,
+  onAdd,
+  onClose,
+}: {
+  products: readonly ShelfProduct[];
+  target: ShelfProduct;
+  onAdd: (item: ShelfProduct) => void;
+  onClose: () => void;
+}): ReactNode {
+  const generic = target.genericName ?? '';
+  const shelfAlternatives = useMemo(() => findMedicineAlternatives(products, target), [products, target]);
+  const catalogueQuery = useQuery({
+    queryKey: ['pos', 'alternatives', generic, target.strength ?? ''],
+    queryFn: async () =>
+      await pharmacyApi.products.alternatives(
+        {
+          genericName: generic,
+          ...(target.strength ? { strength: target.strength } : {}),
+          ...(target.dosageFormId ? { dosageFormId: target.dosageFormId } : {}),
+        },
+        { limit: 20 },
+      ),
+    enabled: generic.trim() !== '',
+    retry: false,
+    staleTime: 30_000,
+  });
+  const catalogueItems = catalogueQuery.data?.items ?? [];
+  const otherBrands = useMemo(
+    () => mergeMedicineAlternatives([target, ...shelfAlternatives.map((alt) => alt.item)], catalogueItems),
+    [shelfAlternatives, catalogueItems, target],
+  );
+
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, padding: 16, gap: 8, backgroundColor: '#F8FAFC', paddingTop: 48 }}>
+        <Text style={{ fontWeight: '700' }}>Alternatives to {target.name}</Text>
+        <Text style={{ color: '#64748B' }}>Same generic: {generic}</Text>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 4 }}>
+          <Text style={{ color: '#64748B', fontSize: 12, fontWeight: '700' }}>On this shelf</Text>
+          {shelfAlternatives.length === 0 && (
+            <Text style={{ color: '#64748B' }}>No other brand of this generic on this shelf.</Text>
+          )}
+          {shelfAlternatives.map((alt) => (
+            <Pressable
+              key={alt.item.id}
+              onPress={() => onAdd(alt.item)}
+              style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12, borderRadius: 8, backgroundColor: '#FFFFFF' }}
+            >
+              <View style={{ flex: 1 }}>
+                <Text>{alt.item.name}</Text>
+                <Text style={{ color: '#64748B', fontSize: 12 }}>
+                  {[alt.item.strength, alt.item.manufacturer].filter((part): part is string => Boolean(part)).join(' · ')}
+                </Text>
+              </View>
+              {/* The strength warning is the whole point of the sheet: a different
+                  strength is a conversation with the customer, not a swap. */}
+              <Text style={{ color: alt.sameStrength ? '#64748B' : '#A16207', fontSize: 12 }}>
+                {alt.sameStrength ? 'same strength' : 'different strength'} · ৳{alt.item.salePrice}
+              </Text>
+            </Pressable>
+          ))}
+          {otherBrands.length > 0 && (
+            <View style={{ gap: 4, marginTop: 8 }}>
+              <Text style={{ color: '#64748B', fontSize: 12, fontWeight: '700' }}>
+                Other brands this branch does not stock
+              </Text>
+              {otherBrands.map((brand: CatalogAlternativeItem) => (
+                <View key={brand.catalogProductId} style={{ padding: 12, borderRadius: 8, backgroundColor: '#FFFFFF' }}>
+                  <Text>{brand.name}</Text>
+                  <Text style={{ color: '#64748B', fontSize: 12 }}>
+                    {[brand.strength, brand.manufacturer].filter((part): part is string => Boolean(part)).join(' · ')}
+                    {!brand.sameStrength ? ' · different strength' : ''}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </ScrollView>
+        <Button title="Close" onPress={onClose} />
+      </View>
+    </Modal>
   );
 }
 
