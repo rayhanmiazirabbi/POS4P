@@ -87,10 +87,10 @@ class AliasIn(ApiModel):
 
 class ProductCreateRequest(ApiModel):
     name: Annotated[str, Field(min_length=1, max_length=240)]
-    generic_name: Annotated[str | None, Field(max_length=240)] = None
+    generic_name: Annotated[str | None, Field(max_length=512)] = None
     manufacturer_id: UUID | None = None
     dosage_form_id: UUID | None = None
-    strength: Annotated[str | None, Field(max_length=100)] = None
+    strength: Annotated[str | None, Field(max_length=512)] = None
     package_size: Decimal = Decimal(1)
     package_unit: PackageName
     prescription_required: bool = False
@@ -113,10 +113,10 @@ class ProductCreateRequest(ApiModel):
 
 class ProductUpdateRequest(ApiModel):
     name: Annotated[str | None, Field(min_length=1, max_length=240)] = None
-    generic_name: Annotated[str | None, Field(max_length=240)] = None
+    generic_name: Annotated[str | None, Field(max_length=512)] = None
     manufacturer_id: UUID | None = None
     dosage_form_id: UUID | None = None
-    strength: Annotated[str | None, Field(max_length=100)] = None
+    strength: Annotated[str | None, Field(max_length=512)] = None
     package_size: Decimal | None = None
     package_unit: PackageName | None = None
     prescription_required: bool | None = None

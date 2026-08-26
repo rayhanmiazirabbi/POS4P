@@ -10,7 +10,7 @@ retyping them; combination products stay NULL until edited.
 document that sits in front of the existing purchase flow. Stock still enters
 only through ``purchases`` confirmation -- these tables carry intent, never stock.
 
-Revision ID: 0011_catalog_adoption_purchase_orders
+Revision ID: 0011_catalog_adoption_po
 Revises: 0010_sync_feed_uniqueness
 """
 
@@ -24,7 +24,7 @@ from alembic import op
 from app.domains.purchase_orders import PurchaseOrderStatus
 from app.models.base import enum_column
 
-revision: str = "0011_catalog_adoption_purchase_orders"
+revision: str = "0011_catalog_adoption_po"
 down_revision: str | None = "0010_sync_feed_uniqueness"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

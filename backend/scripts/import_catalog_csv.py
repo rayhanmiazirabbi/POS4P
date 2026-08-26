@@ -7,11 +7,18 @@ the role-gated API. Run it against a database you own:
     uv run python scripts/import_catalog_csv.py --csv medicines.csv \
         --config scripts/catalog_import.example.json [--dry-run]
 
+(From ``backend/``; PYTHONPATH=. is needed when invoking outside pytest.)
+
 The config maps CSV headers onto catalogue fields (see the example file). Rows
 upsert: a manufacturer, dosage form, or active ingredient is matched by name;
-a catalogue product is matched first on any of its barcodes, then on
-(lower(name), lower(strength), dosage form, country code). Existing products
-are updated in place and get a CatalogRevision row; new ones start at revision 1.
+a catalogue product is matched first on its upstream source ref, then on any of
+its barcodes, then on (lower(name), lower(strength), dosage form, country code).
+Existing products are updated in place and get a CatalogRevision row; new ones
+start at revision 1.
+
+A config with both ``defaults.source`` and ``columnMap.sourceRef`` records the
+upstream key of every row it touches, which is what makes the next refresh from
+that source exact rather than a re-run of the name matching.
 """
 
 from __future__ import annotations
@@ -27,12 +34,14 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.models  # noqa: F401  (loads the domain registry before catalog imports)
 from app.db import get_session
 from app.domains.catalog import (
     ActiveIngredient,
     CatalogBarcode,
     CatalogProduct,
     CatalogRevision,
+    CatalogSourceRef,
     DosageForm,
     Manufacturer,
 )
@@ -54,7 +63,10 @@ def parse_rows(csv_path: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
         reader = csv.DictReader(handle)
         for raw in reader:
             row: dict[str, Any] = {}
-            for field in ("name", "genericName", "strength", "dosageForm", "manufacturer"):
+            for field in (
+                "name", "genericName", "strength", "dosageForm", "manufacturer", "packageUnit",
+                "sourceRef",
+            ):
                 header = mapping.get(field)
                 value = raw.get(header, "").strip() if header else ""
                 if value:
@@ -71,8 +83,9 @@ def parse_rows(csv_path: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
             if barcodes:
                 row["barcodes"] = [code for code in barcodes if code]
             rx_header = mapping.get("prescriptionRequired")
-            if rx_header:
-                row["prescriptionRequired"] = raw.get(rx_header, "").strip().lower() in TRUTHY
+            rx_value = raw.get(rx_header, "").strip() if rx_header else ""
+            if rx_value:
+                row["prescriptionRequired"] = rx_value.lower() in TRUTHY
             unit_header = mapping.get("unitPrice")
             if unit_header and raw.get(unit_header, "").strip():
                 row["unitPrice"] = raw[unit_header].strip()
@@ -118,10 +131,34 @@ async def _upsert_reference(
     return row
 
 
+async def _find_source_ref(
+    session: AsyncSession, source: str, external_id: str
+) -> CatalogSourceRef | None:
+    return await _first_scalar(
+        session,
+        select(CatalogSourceRef).where(
+            CatalogSourceRef.source == source,
+            CatalogSourceRef.external_id == external_id,
+        ),
+    )
+
+
 async def find_product(
-    session: AsyncSession, row: dict[str, Any], country_code: str
+    session: AsyncSession, row: dict[str, Any], country_code: str, source: str | None = None
 ) -> CatalogProduct | None:
-    """Dedupe priority: any mapped barcode wins, then the natural key."""
+    """Dedupe priority: the source ref wins, then any mapped barcode, then the natural key.
+
+    The ref comes first because it is the only key that survives an upstream edit.
+    The natural key includes name, strength and dosage form, so a refresh that
+    corrects any of the three stops matching and would fork a second row for a
+    medicine that already exists.
+    """
+    if source and row.get("sourceRef"):
+        ref = await _find_source_ref(session, source, row["sourceRef"])
+        if ref is not None:
+            product = await session.get(CatalogProduct, ref.catalog_product_id)
+            if product is not None:
+                return product
     for code in row.get("barcodes", []):
         existing = await _first_scalar(
             session, select(CatalogBarcode).where(CatalogBarcode.barcode == code)
@@ -157,6 +194,7 @@ async def import_row(
     """Import one parsed row; returns 'created' or 'updated'."""
     defaults = config.get("defaults", {})
     country_code = str(defaults.get("countryCode", "BD")).upper()
+    source = str(defaults.get("source") or "") or None
     package_unit = str(row.get("packageUnit") or defaults.get("packageUnit") or "piece")
     package_size = _decimal(str(row.get("packageSize") or defaults.get("packageSize") or "1"))
     package_size = package_size if package_size is not None else Decimal(1)
@@ -170,7 +208,7 @@ async def import_row(
     if row.get("dosageForm"):
         dosage_form_id = (await _upsert_reference(session, DosageForm, row["dosageForm"])).id
 
-    product = await find_product(session, row, country_code)
+    product = await find_product(session, row, country_code, source)
     created = product is None
     if product is None:
         product = CatalogProduct(
@@ -200,6 +238,17 @@ async def import_row(
         if price is not None:
             product.strip_price = price
     await session.flush()
+
+    if source and row.get("sourceRef"):
+        source_ref = await _find_source_ref(session, source, row["sourceRef"])
+        if source_ref is None:
+            session.add(
+                CatalogSourceRef(
+                    catalog_product_id=product.id,
+                    source=source,
+                    external_id=row["sourceRef"],
+                )
+            )
 
     existing_barcodes = set(
         await session.scalars(
@@ -255,7 +304,7 @@ async def import_row(
                 "unitPrice": str(product.unit_price) if product.unit_price is not None else None,
                 "stripPrice": str(product.strip_price) if product.strip_price is not None else None,
                 "countryCode": product.country_code,
-                "source": "csv_import",
+                "source": source or "csv_import",
             },
             created_at=utc_now(),
         )

@@ -13,6 +13,7 @@ from app.domains.catalog import (
     CatalogProduct,
     CatalogProductIngredient,
     CatalogRevision,
+    CatalogSourceRef,
     DosageForm,
     Manufacturer,
 )
@@ -76,6 +77,7 @@ __all__ = [
     "CatalogProduct",
     "CatalogProductIngredient",
     "CatalogRevision",
+    "CatalogSourceRef",
     "Customer",
     "CustomerAddress",
     "DailyStoreMetric",

@@ -13,6 +13,7 @@ from app.domains.catalog import (
     CatalogBarcode,
     CatalogProduct,
     CatalogRevision,
+    CatalogSourceRef,
     DosageForm,
     Manufacturer,
 )
@@ -67,6 +68,15 @@ async def test_parse_rows_maps_headers(tmp_path: Path) -> None:
             "prescriptionRequired": True,
         }
     ]
+
+
+async def test_parse_rows_leaves_blank_rx_unknown(tmp_path: Path) -> None:
+    csv_path = _csv(
+        tmp_path / "unknown-rx.csv",
+        [["Unclassified", "Molecule", "10mg", "Tablet", "Maker", "1", "", ""]],
+    )
+    rows = parse_rows(csv_path, CONFIG)
+    assert "prescriptionRequired" not in rows[0]
 
 
 async def test_import_insert_update_and_barcode_dedupe(
@@ -127,6 +137,35 @@ async def test_import_insert_update_and_barcode_dedupe(
     )
     assert summary == {"created": 0, "updated": 1}
     assert int(await session.scalar(select(func.count()).select_from(CatalogProduct))) == 1
+
+
+async def test_source_ref_survives_upstream_rename(session: Any) -> None:
+    config: dict[str, Any] = {
+        "defaults": {"countryCode": "BD", "packageUnit": "piece", "source": "dgda"}
+    }
+    first = {
+        "name": "Registry Name",
+        "genericName": "Molecule",
+        "strength": "10 mg",
+        "dosageForm": "Tablet",
+        "sourceRef": "123-456-789",
+    }
+    assert await import_rows(session, [first], config, dry_run=False) == {
+        "created": 1,
+        "updated": 0,
+    }
+
+    renamed = {**first, "name": "Corrected Registry Name"}
+    assert await import_rows(session, [renamed], config, dry_run=False) == {
+        "created": 0,
+        "updated": 1,
+    }
+    product = (await session.scalars(select(CatalogProduct))).one()
+    assert product.name == "Corrected Registry Name"
+    source_ref = (await session.scalars(select(CatalogSourceRef))).one()
+    assert source_ref.source == "dgda"
+    assert source_ref.external_id == "123-456-789"
+    assert source_ref.catalog_product_id == product.id
 
 
 async def test_dry_run_commits_nothing(session: Any) -> None:

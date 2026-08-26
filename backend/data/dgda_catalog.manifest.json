@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "source": "https://api.tr.ocl.dghs.gov.bd/orgs/MoHFW/collections/dgda-registered-drugs-valueset/concepts/",
+  "generatedAt": "2026-08-26T11:46:38+00:00",
+  "artifact": "dgda_catalog.csv.gz",
+  "compression": "gzip",
+  "sha256": "8fbf41a3cbe559ae79b880226da4120331b4c64ab8d6a8b71e862226865966d9",
+  "uncompressedSha256": "d229d050e2ae9e31a933a6ff76b529d59cce4f4f5b9054403157023432c1a0f8",
+  "registryRows": 39195,
+  "importableRows": 39190,
+  "missingProductNames": [
+    "003--015",
+    "143-0675-045",
+    "304--077",
+    "308--060",
+    "321--015"
+  ],
+  "manufacturers": 326
+}

@@ -1,0 +1,21 @@
+{
+  "columnMap": {
+    "sourceRef": "Registry Id",
+    "name": "Product Name",
+    "genericName": "Generic Name",
+    "strength": "Strength",
+    "dosageForm": "Dosage Form",
+    "manufacturer": "Manufacturer",
+    "packageSize": "Pack Size",
+    "packageUnit": "Package Unit",
+    "unitPrice": "Unit Price",
+    "stripPrice": "Strip Price",
+    "prescriptionRequired": "Rx"
+  },
+  "defaults": {
+    "source": "dgda",
+    "countryCode": "BD",
+    "packageUnit": "piece",
+    "packageSize": "1"
+  }
+}

@@ -28,7 +28,7 @@ class Manufacturer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 class ActiveIngredient(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "active_ingredients"
 
-    name: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
 
 
 class DosageForm(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -47,8 +47,8 @@ class CatalogProduct(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     manufacturer_id: Mapped[UUID | None] = mapped_column(ForeignKey("manufacturers.id"))
     dosage_form_id: Mapped[UUID | None] = mapped_column(ForeignKey("dosage_forms.id"))
     name: Mapped[str] = mapped_column(String(240), nullable=False)
-    generic_name: Mapped[str | None] = mapped_column(String(240))
-    strength: Mapped[str | None] = mapped_column(String(100))
+    generic_name: Mapped[str | None] = mapped_column(String(512))
+    strength: Mapped[str | None] = mapped_column(String(512))
     package_size: Mapped[Decimal] = mapped_column(quantity_column(), default=1, nullable=False)
     package_unit: Mapped[str] = mapped_column(String(40), nullable=False)
     prescription_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -84,6 +84,29 @@ class CatalogAlias(UUIDPrimaryKeyMixin, Base):
 
     catalog_product_id: Mapped[UUID] = mapped_column(ForeignKey("catalog_products.id"), nullable=False)
     alias: Mapped[str] = mapped_column(String(240), nullable=False)
+
+
+class CatalogSourceRef(UUIDPrimaryKeyMixin, Base):
+    """Upstream identity of an imported row, e.g. a DGDA registry concept ID.
+
+    Bulk imports otherwise have to re-derive which catalogue row a scraped product
+    belongs to on every run, by name/strength/dosage form. That matching is lossy
+    across releases can cause a near match to fork a duplicate instead of updating
+    in place, and duplicates in
+    shared reference data are how an Rx medicine ends up sellable without a
+    prescription (``prescription_required`` defaults to False on a new row).
+    Recording the upstream key once makes every later refresh exact.
+
+    Not unique per (product, source): one product legitimately answers to several
+    upstream slugs when the source lists a medicine twice.
+    """
+
+    __tablename__ = "catalog_source_refs"
+    __table_args__ = (UniqueConstraint("source", "external_id"),)
+
+    catalog_product_id: Mapped[UUID] = mapped_column(ForeignKey("catalog_products.id"), nullable=False)
+    source: Mapped[str] = mapped_column(String(40), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(160), nullable=False)
 
 
 class CatalogRevision(AppendOnlyMixin, UUIDPrimaryKeyMixin, Base):
