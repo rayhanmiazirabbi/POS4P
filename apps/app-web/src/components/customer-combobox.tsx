@@ -27,12 +27,15 @@ const BD_MOBILE = /^(?:\+?880|0)?1[3-9]\d{8}$/;
 export function CustomerCombobox({
   selectedId,
   selectedLabel,
+  loyaltyPoints,
   onSelect,
   onClear,
   onError,
 }: {
   selectedId: string | null;
   selectedLabel: string | null;
+  /** The attached customer's loyalty balance, when the account answered. */
+  loyaltyPoints: number | null;
   onSelect: (pick: CustomerPick) => void;
   onClear: () => void;
   onError: (message: string) => void;
@@ -169,15 +172,20 @@ export function CustomerCombobox({
       </div>
       {selectedId !== null && term === '' && (
         <div className="customer-history">
-          <button
-            type="button"
-            className="customer-history-toggle"
-            aria-expanded={historyOpen}
-            onClick={() => { setHistoryOpen((open) => !open); if (!historyOpen) void historyQuery.refetch(); }}
-          >
-            Recent purchases{historyQuery.data !== undefined ? ` (${historyQuery.data.length})` : ''}
-            <span aria-hidden="true">{historyOpen ? '▴' : '▾'}</span>
-          </button>
+          <div className="customer-meta-row">
+            {loyaltyPoints !== null && (
+              <span className="customer-loyalty" title="Loyalty points">⚡ {loyaltyPoints} pts</span>
+            )}
+            <button
+              type="button"
+              className="customer-history-toggle"
+              aria-expanded={historyOpen}
+              onClick={() => { setHistoryOpen((open) => !open); if (!historyOpen) void historyQuery.refetch(); }}
+            >
+              Recent purchases{historyQuery.data !== undefined ? ` (${historyQuery.data.length})` : ''}
+              <span aria-hidden="true">{historyOpen ? '▴' : '▾'}</span>
+            </button>
+          </div>
           {historyOpen && (
             <div className="customer-history-list">
               {historyQuery.isLoading && <p className="finder-note" role="status">Loading purchases…</p>}

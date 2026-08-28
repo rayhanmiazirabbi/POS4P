@@ -286,7 +286,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .selected-customer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 6px 6px; padding: 7px 9px; color: #246c50; text-align: left; background: var(--pos-accent-soft); border: 0; border-radius: 7px; cursor: pointer; font-size: 11px; }
 .customer-combobox { position: relative; }
 .customer-history { margin-top: 8px; }
-.customer-history-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; padding: 7px 10px; color: var(--pos-muted); background: var(--pos-soft); border: 1px solid var(--pos-line); border-radius: 8px; cursor: pointer; font-size: 11px; font-weight: 700; }
+.customer-meta-row { display: flex; align-items: stretch; gap: 6px; }
+.customer-loyalty { display: inline-flex; align-items: center; padding: 0 10px; color: var(--pos-ink); background: var(--pos-soft); border: 1px solid var(--pos-line); border-radius: 8px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.customer-history-toggle { display: flex; flex: 1; align-items: center; justify-content: space-between; padding: 7px 10px; color: var(--pos-muted); background: var(--pos-soft); border: 1px solid var(--pos-line); border-radius: 8px; cursor: pointer; font-size: 11px; font-weight: 700; }
 .customer-history-toggle:hover { color: var(--pos-ink); }
 .customer-history-list { margin-top: 6px; display: grid; gap: 6px; max-height: 220px; overflow: auto; }
 .customer-history-row { display: grid; gap: 2px; padding: 7px 9px; background: #fff; border: 1px solid var(--pos-line); border-radius: 8px; }

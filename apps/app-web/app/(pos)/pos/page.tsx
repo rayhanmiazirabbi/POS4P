@@ -153,6 +153,15 @@ export default function PosPage(): ReactNode {
     () => (settingsQuery.data?.paymentMethods ?? []).filter((method) => method.active),
     [settingsQuery.data],
   );
+  // Enroll-or-fetch: the endpoint answers with the existing account for a
+  // customer already in the program, so attach alone is enough to show a balance.
+  // A query that posts is unusual, but the endpoint is idempotent by design.
+  const loyaltyAccount = useQuery({
+    queryKey: ['pos', 'loyalty', customerId],
+    enabled: customerId !== null,
+    staleTime: 30_000,
+    queryFn: async () => (await pharmacyApi.loyalty.enroll({ customerId: customerId as string })).data,
+  });
 
   // The stored choice can fall out of the configured list (a method renamed
   // inactive, settings just loaded); re-anchor it to the first real method.
@@ -499,6 +508,7 @@ export default function PosPage(): ReactNode {
         void queryClient.invalidateQueries({ queryKey: ['inventory'] });
         void queryClient.invalidateQueries({ queryKey: ['pos', 'cash-session'] });
         void queryClient.invalidateQueries({ queryKey: ['pos', 'customer-history'] });
+        if (customerId !== null) void earnLoyalty(response.data.id, response.data.total, customerId);
       } else {
         throw { code: 'NETWORK_ERROR' };
       }
@@ -540,6 +550,33 @@ export default function PosPage(): ReactNode {
     } finally {
       refetchQueue();
       setBusy(false);
+    }
+  }
+
+  /**
+   * Post the sale's loyalty earn once the server has accepted it.
+   *
+   * The ledger row references the sale id, so earning cannot happen before the
+   * sale exists — and an offline sale earns nothing here, because the id is the
+   * server's to assign when the queued upload lands. The idempotency key is the
+   * sale id, so a retried or double-fired earn is the same row, not double points.
+   * A failure is said out loud but never unwinds the sale.
+   */
+  async function earnLoyalty(saleId: string, serverTotal: string, loyaltyCustomerId: string): Promise<void> {
+    const rate = settingsQuery.data?.loyaltyPointsPerHundred ?? 0;
+    if (rate <= 0) return;
+    const points = Math.floor((Number(serverTotal) * rate) / 100);
+    if (points <= 0) return;
+    try {
+      const account = loyaltyAccount.data ?? (await pharmacyApi.loyalty.enroll({ customerId: loyaltyCustomerId })).data;
+      await pharmacyApi.loyalty.postTransaction(
+        account.id,
+        { transactionType: 'earn', points, sourceType: 'sale', sourceId: saleId },
+        `loyalty-earn-${saleId}`,
+      );
+      void queryClient.invalidateQueries({ queryKey: ['pos', 'loyalty', loyaltyCustomerId] });
+    } catch {
+      setError(`Sale saved, but its ${points} loyalty points could not be added. Note it and adjust the account manually.`);
     }
   }
 
@@ -689,6 +726,7 @@ export default function PosPage(): ReactNode {
         <CustomerCombobox
           selectedId={customerId}
           selectedLabel={customerName}
+          loyaltyPoints={loyaltyAccount.data?.balance ?? null}
           onSelect={(pick) => {
             updateActive((current) => ({ ...current, customerId: pick.id, customerName: pick.label }));
             setError(null);

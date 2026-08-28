@@ -109,6 +109,7 @@ async def test_create_organization_applies_settings_defaults(
         "lowStockThresholdDays": 14,
         "allowNegativeStock": False,
         "receiptFooter": None,
+        "loyaltyPointsPerHundred": 0,
         "paymentMethods": [
             {"value": "bkash", "label": "bKash", "active": True},
             {"value": "nagad", "label": "Nagad", "active": True},

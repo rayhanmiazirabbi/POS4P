@@ -45,6 +45,8 @@ export type OrganizationSettings = {
   lowStockThresholdDays: number;
   allowNegativeStock: boolean;
   receiptFooter: string | null;
+  /** Points earned per 100 spent on a completed sale; 0 disables loyalty earning. */
+  loyaltyPointsPerHundred: number;
   /** Digital tenders this tenant may book; cash and due are structural and never listed. */
   paymentMethods: ConfiguredPaymentMethod[];
 };
@@ -372,6 +374,7 @@ export type PharmacyApi = {
   payments: PaymentsClient;
   cashSessions: CashSessionsClient;
   customers: CustomersClient;
+  loyalty: LoyaltyClient;
   reports: ReportsClient;
   sync: SyncClient;
   orders: OrdersClient;
@@ -397,6 +400,7 @@ export function createPharmacyApi(client: ApiClient): PharmacyApi {
     payments: createPaymentsClient(client),
     cashSessions: createCashSessionsClient(client),
     customers: createCustomersClient(client),
+    loyalty: createLoyaltyClient(client),
     reports: createReportsClient(client),
     sync: createSyncClient(client),
     orders: createOrdersClient(client),
@@ -712,6 +716,63 @@ export function createCustomersClient(client: ApiClient): CustomersClient {
       client.get<CustomerAddress[]>(`/customers/${segment(customerId)}/addresses`, options),
     createAddress: (customerId, body, options = {}) =>
       client.post<CustomerAddress>(`/customers/${segment(customerId)}/addresses`, body, options),
+  };
+}
+
+export type LoyaltyAccount = {
+  id: string;
+  organizationId: string;
+  customerId: string;
+  balance: number;
+  active: boolean;
+};
+
+/** Earn/redeem are counter actions; adjust and expire are owner/manager-only. */
+export type LoyaltyTransactionRequest = {
+  transactionType: 'earn' | 'redeem' | 'refund' | 'bonus';
+  points: number;
+  sourceType: string;
+  sourceId: string;
+  expiresAt?: string;
+};
+
+export type LoyaltyTransaction = {
+  id: string;
+  accountId: string;
+  transactionType: string;
+  points: number;
+  balanceAfter?: number | null;
+  sourceType: string;
+  sourceId: string;
+  expiresAt?: string | null;
+  createdAt: string;
+};
+
+export type LoyaltyClient = {
+  /** Enroll, or return the existing account: safe to call for every attached customer. */
+  enroll(body: { customerId: string }, options?: RequestOptions): Promise<ApiResponse<LoyaltyAccount>>;
+  readAccount(accountId: string, options?: RequestOptions): Promise<ApiResponse<LoyaltyAccount>>;
+  /**
+   * Append one ledger row. Idempotent on the explicit key: this endpoint reads
+   * `idempotencyKey` as a *query* parameter, unlike the header-keyed sales API.
+   */
+  postTransaction(
+    accountId: string,
+    body: LoyaltyTransactionRequest,
+    idempotencyKey: string,
+    options?: RequestOptions,
+  ): Promise<ApiResponse<LoyaltyTransaction>>;
+};
+
+export function createLoyaltyClient(client: ApiClient): LoyaltyClient {
+  return {
+    enroll: (body, options = {}) => client.post<LoyaltyAccount>('/loyalty/accounts', body, options),
+    readAccount: (accountId, options = {}) => client.get<LoyaltyAccount>(`/loyalty/accounts/${segment(accountId)}`, options),
+    postTransaction: (accountId, body, idempotencyKey, options = {}) =>
+      client.post<LoyaltyTransaction>(`/loyalty/accounts/${segment(accountId)}/transactions`, body, {
+        ...options,
+        query: { ...options.query, idempotencyKey },
+      }),
   };
 }
 
