@@ -112,6 +112,10 @@ _SENSITIVE_KEYS = frozenset(
         "refresh_token_hash",
         "secret",
         "authorization",
+        # Uploaded receipt logos are data URLs. Keeping the bytes in every before
+        # and after audit snapshot would multiply the store settings row into the
+        # audit table; the settings value itself remains the source of truth.
+        "receipt_logo",
     }
 )
 

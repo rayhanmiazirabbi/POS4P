@@ -135,6 +135,34 @@ async def test_create_store_inherits_organization_defaults(
     assert body["settings"] == {
         "receiptHeader": None,
         "receiptFooter": None,
+        "receiptLogo": None,
+        "receiptBusinessName": None,
+        "receiptAddress": None,
+        "receiptPhone": None,
+        "receiptEmail": None,
+        "receiptTaxId": None,
+        "receiptPaperWidthMm": 80,
+        "receiptShowLogo": True,
+        "receiptShowBusinessName": True,
+        "receiptShowStoreName": True,
+        "receiptShowContactDetails": True,
+        "receiptShowHeader": True,
+        "receiptShowReceiptNumber": True,
+        "receiptShowDateTime": True,
+        "receiptShowCustomer": True,
+        "receiptShowCashier": True,
+        "receiptShowItems": True,
+        "receiptShowItemQuantity": True,
+        "receiptShowUnitPrice": True,
+        "receiptShowLineTotal": True,
+        "receiptShowSubtotal": True,
+        "receiptShowDiscounts": True,
+        "receiptShowCharges": True,
+        "receiptShowTotal": True,
+        "receiptShowPayments": True,
+        "receiptShowCashReceived": True,
+        "receiptShowChangeDue": True,
+        "receiptShowFooter": True,
         "businessDayCutoffHour": 0,
         "lowStockAlerts": True,
         "allowOfflineSales": True,
@@ -520,6 +548,55 @@ async def test_store_settings_update_merges_and_audits(
     store = await _refetch(session, tenant["store"].id)
     assert store.settings["receipt_footer"] == "Get well soon"
     assert "store.settings_updated" in await _audit_actions(session, store.id)
+
+
+async def test_receipt_settings_validate_layout_and_redact_uploaded_logo(
+    client: AsyncClient, session: AsyncSession, tenant: dict[str, Any], auth_headers: Any
+) -> None:
+    logo = "data:image/png;base64,iVBORw0KGgo="
+    response = await client.patch(
+        f"/stores/{tenant['store'].id}/settings",
+        json={
+            "receiptLogo": logo,
+            "receiptPaperWidthMm": 58,
+            "receiptBusinessName": "Care Pharmacy",
+            "receiptShowTotal": False,
+        },
+        headers=auth_headers(tenant),
+    )
+    assert response.status_code == 200
+    settings = response.json()["data"]["settings"]
+    assert settings["receiptLogo"] == logo
+    assert settings["receiptPaperWidthMm"] == 58
+    assert settings["receiptShowTotal"] is False
+
+    audit = await session.scalar(
+        select(AuditLog)
+        .where(AuditLog.store_id == tenant["store"].id)
+        .order_by(AuditLog.created_at.desc())
+    )
+    assert audit is not None
+    assert audit.after_data is not None
+    assert audit.after_data["receipt_logo"] == "[redacted]"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"receiptPaperWidthMm": 47}, "greater than or equal to 48"),
+        ({"receiptPaperWidthMm": 211}, "less than or equal to 210"),
+        ({"receiptLogo": "http://example.com/logo.png"}, "HTTPS URL"),
+        ({"receiptLogo": "data:image/svg+xml;base64,PHN2Zz4="}, "PNG, JPEG, or WebP"),
+    ],
+)
+async def test_receipt_settings_reject_invalid_print_configuration(
+    client: AsyncClient, tenant: dict[str, Any], auth_headers: Any, payload: dict[str, Any], message: str
+) -> None:
+    response = await client.patch(
+        f"/stores/{tenant['store'].id}/settings", json=payload, headers=auth_headers(tenant)
+    )
+    assert response.status_code == 422
+    assert message in str(response.json())
 
 
 async def test_store_settings_update_rejects_unknown_keys(

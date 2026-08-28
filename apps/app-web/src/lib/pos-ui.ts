@@ -2,7 +2,7 @@
 
 import { create } from 'zustand';
 
-import type { Receipt } from '@pharmacy/sales';
+import type { PrintableReceipt } from './receipt';
 
 export type DigitalMethod = 'bkash' | 'nagad';
 
@@ -10,11 +10,11 @@ type PosUiState = {
   cashReceived: string;
   digitalAmount: string;
   digitalMethod: DigitalMethod;
-  receipt: Receipt | null;
+  receipt: PrintableReceipt | null;
   setCashReceived: (value: string) => void;
   setDigitalAmount: (value: string) => void;
   setDigitalMethod: (method: DigitalMethod) => void;
-  setReceipt: (receipt: Receipt | null) => void;
+  setReceipt: (receipt: PrintableReceipt | null) => void;
   resetTender: () => void;
 };
 

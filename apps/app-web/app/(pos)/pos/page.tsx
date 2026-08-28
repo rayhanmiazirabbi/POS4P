@@ -4,14 +4,13 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DiscountInput, InventoryIntake, SaleChargeInput, SaleCreateRequest } from '@pharmacy/api';
 import {
   calculateSaleTotals,
-  formatReceiptText,
   provisionalReceipt,
   receiptFromSale,
   splitTender,
   tenderPayments,
   validateSalePayments,
   wirePayments,
-  type Receipt as ReceiptModel,
+  type Receipt as SaleReceipt,
 } from '@pharmacy/sales';
 import { money, multiply, type MoneyValue } from '@pharmacy/money';
 import { colors, spacing, tokens } from '@pharmacy/design-tokens';
@@ -33,13 +32,16 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 
 import { pharmacyApi } from '@/lib/api';
+import { CustomerCombobox } from '@/components/customer-combobox';
 import { IntakeDrawer } from '@/components/intake-drawer';
 import { MedicineFinder, type MedicineSelection } from '@/components/medicine-finder';
+import { ReceiptDialog } from '@/components/receipt-dialog';
 import { amountDueNow, calculateCheckout } from '@/lib/checkout';
 import { decimalEntry } from '@/lib/numeric-input';
 import { flushQueue, forgetSale, queueSale, queueStatus, recoverOutbox, type SaleQueueStatus } from '@/lib/offlineQueue';
 import { draftHasItems, usePosDrafts, type CartLine, type PosDraft } from '@/lib/pos-drafts';
 import { usePosUi } from '@/lib/pos-ui';
+import { defaultReceiptConfig, loadEffectiveReceiptConfig, type PrintableReceipt } from '@/lib/receipt';
 import { useSession } from '@/lib/session';
 import { shelf } from '@/lib/shelf';
 
@@ -97,7 +99,6 @@ export default function PosPage(): ReactNode {
   const [approvalOpen, setApprovalOpen] = useState(false);
   const [approvalPhone, setApprovalPhone] = useState('');
   const [approvalPin, setApprovalPin] = useState('');
-  const [customerSearch, setCustomerSearch] = useState('');
   const approvalPanelRef = useRef<HTMLDivElement>(null);
   const cashInputRef = useRef<HTMLInputElement>(null);
   const digitalInputRef = useRef<HTMLInputElement>(null);
@@ -142,6 +143,27 @@ export default function PosPage(): ReactNode {
     queryKey: ['organization', 'settings'],
     queryFn: async () => (await pharmacyApi.organizations.readSettings()).data.settings,
     staleTime: 60_000,
+  });
+  const receiptSettingsQuery = useQuery({
+    queryKey: ['receipt-config', user?.organizationId, storeId],
+    enabled: Boolean(user?.organizationId && storeId),
+    staleTime: 60_000,
+    queryFn: async () => {
+      let locale = settingsQuery.data?.locale ?? 'en-BD';
+      let timezone = settingsQuery.data?.defaultTimezone ?? 'Asia/Dhaka';
+      let storeName = user?.storeName ?? '';
+      const config = await loadEffectiveReceiptConfig(user!.organizationId, storeId as string, async () => {
+        const [storeResponse, organizationResponse] = await Promise.all([
+          pharmacyApi.stores.readCurrent(),
+          pharmacyApi.organizations.readSettings(),
+        ]);
+        locale = organizationResponse.data.settings.locale;
+        timezone = storeResponse.data.timezone;
+        storeName = storeResponse.data.name;
+        return { store: storeResponse.data.settings, organization: organizationResponse.data.settings };
+      });
+      return { config, locale, timezone, storeName };
+    },
   });
 
   // The queue read is held back until `recoverOutbox` has settled -- see the mount
@@ -296,7 +318,17 @@ export default function PosPage(): ReactNode {
     total: money(pricing.data.total), paid: money('0.00'), due: money('0.00'),
   }), [pricing.data]);
 
-  const receiptHeader = { organizationName: user?.organizationName ?? '', storeName: user?.storeName ?? '', customerName };
+  const receiptHeader = { organizationName: user?.organizationName ?? '', storeName: receiptSettingsQuery.data?.storeName ?? user?.storeName ?? '', customerName };
+
+  function printableReceipt(saleReceipt: SaleReceipt): PrintableReceipt {
+    return {
+      receipt: saleReceipt,
+      config: receiptSettingsQuery.data?.config ?? defaultReceiptConfig,
+      cashierName: user?.user.displayName ?? null,
+      locale: receiptSettingsQuery.data?.locale ?? settingsQuery.data?.locale ?? 'en-BD',
+      timezone: receiptSettingsQuery.data?.timezone ?? settingsQuery.data?.defaultTimezone ?? 'Asia/Dhaka',
+    };
+  }
 
   function addToCart(product: ShelfProduct): void {
     setCart((current) => {
@@ -435,7 +467,7 @@ export default function PosPage(): ReactNode {
     try {
       if (navigator.onLine) {
         const response = await pharmacyApi.sales.create(body, { idempotencyKey });
-        setReceipt(receiptFromSale(response.data, receiptHeader));
+        setReceipt(printableReceipt(receiptFromSale(response.data, receiptHeader)));
         clearCart();
         refetchShelf();
         void queryClient.invalidateQueries({ queryKey: ['inventory'] });
@@ -457,12 +489,12 @@ export default function PosPage(): ReactNode {
           // The customer still gets a slip. It carries no receipt number, because
           // that number is the server's to assign and one invented here would later
           // belong to a different sale.
-          setReceipt(provisionalReceipt({
+          setReceipt(printableReceipt(provisionalReceipt({
             ...receiptHeader, issuedAt: new Date().toISOString(), lines: saleLines, payments,
             total: money(pricing.data.total), deliveryCharge: money(pricing.data.deliveryCharge),
             otherFeeLabel: otherFeeLabel.trim() || null, otherFee: money(pricing.data.otherFee),
             advanceApplied: money(advance.trim() || '0.00'), advanceReference: advanceReference.trim() || null,
-          }));
+          })));
           setError('Offline — sale queued. It will upload automatically when the connection returns.');
           clearCart();
         } catch {
@@ -499,22 +531,6 @@ export default function PosPage(): ReactNode {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Discount approval failed');
     } finally { setBusy(false); }
-  }
-
-  async function findCustomer(term: string): Promise<void> {
-    if (term.trim() === '') return;
-    try {
-      const page = await pharmacyApi.customers.search({ q: term.trim() }, { limit: 5 });
-      const match = page.items[0];
-      if (match) {
-        updateActive((current) => ({ ...current, customerId: match.id, customerName: `${match.name}${match.normalizedPhone ? ` · ${match.normalizedPhone}` : ''}` }));
-        setError(null);
-      } else {
-        setError('No customer matched that name or phone');
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Customer lookup failed');
-    }
   }
 
   const queue: SaleQueueStatus = queueQuery.data ?? emptyQueue;
@@ -633,16 +649,15 @@ export default function PosPage(): ReactNode {
         </section>
         {pricing.problem && <p role="alert" className="form-error" style={{ margin: 0 }}>{pricing.problem}</p>}
 
-        <div className="customer-lookup">
-          <span aria-hidden="true"><PosIcon name="user" /></span>
-          <input placeholder="Customer name or phone" value={customerSearch} onChange={(event) => setCustomerSearch(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void findCustomer(customerSearch); }} />
-          <button type="button" aria-label="Find customer" disabled={!customerSearch.trim()} onClick={() => void findCustomer(customerSearch)}><PosIcon name="search" /></button>
-          {customerId !== null && (
-            <button type="button" className="selected-customer" onClick={() => updateActive((current) => ({ ...current, customerId: null, customerName: null }))}>
-              {customerName ?? 'Customer'} <span aria-hidden="true">×</span>
-            </button>
-          )}
-        </div>
+        <CustomerCombobox
+          selectedLabel={customerName}
+          onSelect={(pick) => {
+            updateActive((current) => ({ ...current, customerId: pick.id, customerName: pick.label }));
+            setError(null);
+          }}
+          onClear={() => updateActive((current) => ({ ...current, customerId: null, customerName: null }))}
+          onError={setError}
+        />
 
         {customerId !== null && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.xs }}>
           <label style={{ fontSize: tokens.typography.sizes.sm }}>Advance applied<input className="field" inputMode="decimal" placeholder="0.00" value={advance} onChange={(event) => setDraftField('advance', decimalEntry(event.target.value))} /></label>
@@ -707,7 +722,7 @@ export default function PosPage(): ReactNode {
           />
         )}
         {error !== null && <p role="alert" style={{ margin: 0, color: error.startsWith('Offline') ? colors.warning : colors.danger }}>{error}</p>}
-        {receipt !== null && <ReceiptPanel receipt={receipt} />}
+        {receipt !== null && <ReceiptDialog printable={receipt} onClose={() => setReceipt(null)} />}
       </section>
       <section className="surface held-carts" aria-labelledby="held-carts-title">
         <header className="held-header"><div><span className="eyebrow">Suspended sales</span><h2 id="held-carts-title">Held carts <span>{heldCarts.length}</span></h2></div><kbd>F8</kbd></header>
@@ -1022,51 +1037,6 @@ function AlternativeList({
       <button type="button" style={{ ...button, alignSelf: 'flex-start', padding: `${spacing.xs} ${spacing.sm}` }} onClick={onClose}>
         Close
       </button>
-    </div>
-  );
-}
-
-/**
- * The slip, from one model whether the sale was filed or queued.
- *
- * `window.print` prints the page, so the text form is offered alongside it: it is
- * what a thermal printer takes, and it is the same string the desktop till sends
- * to `hardware.printReceipt`.
- */
-function ReceiptPanel({ receipt }: { receipt: ReceiptModel }): ReactNode {
-  return (
-    <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: spacing.md }}>
-      <h3 style={{ margin: `0 0 ${spacing.xs}` }}>
-        {receipt.receiptNumber === null ? 'Receipt pending upload' : `Receipt ${receipt.receiptNumber}`}
-      </h3>
-      {receipt.receiptNumber === null && (
-        <p style={{ margin: `0 0 ${spacing.xs}`, color: colors.warning, fontSize: tokens.typography.sizes.sm }}>
-          {/* Said plainly: the number is assigned by the server, and inventing one
-              here would hand out a number that later belongs to a different sale. */}
-          This sale is queued on this device. Its number is issued when it uploads.
-        </p>
-      )}
-      <ul style={{ listStyle: 'none', margin: 0, paddingLeft: 0, fontSize: tokens.typography.sizes.sm, color: colors.muted }}>
-        {receipt.lines.map((line, index) => (
-          <li key={`${line.name}-${index}`}>{line.name} × {line.quantity} = ৳{line.lineTotal.amount}</li>
-        ))}
-      </ul>
-      {(receipt.deliveryCharge?.amount !== '0.00' || receipt.otherFee?.amount !== '0.00' || receipt.advanceApplied?.amount !== '0.00') && <div style={{ marginTop: spacing.xs, color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
-        {receipt.deliveryCharge?.amount !== '0.00' && <div>Delivery ৳{receipt.deliveryCharge?.amount}</div>}
-        {receipt.otherFee?.amount !== '0.00' && <div>{receipt.otherFeeLabel ?? 'Other fee'} ৳{receipt.otherFee?.amount}</div>}
-        {receipt.advanceApplied?.amount !== '0.00' && <div>Advance applied −৳{receipt.advanceApplied?.amount}{receipt.advanceReference ? ` · ${receipt.advanceReference}` : ''}</div>}
-      </div>}
-      <p style={{ margin: `${spacing.xs} 0` }}>
-        <strong>Total ৳{receipt.totals.total.amount}</strong> · {receipt.payments.map((payment) => `${payment.method} ৳${payment.amount.amount}`).join(', ')}
-        {receipt.change.amount === '0.00' ? '' : ` · change ৳${receipt.change.amount}`}
-      </p>
-      <p style={{ margin: 0, fontSize: tokens.typography.sizes.sm, color: colors.muted }}>{receipt.organizationName}</p>
-      <div style={{ display: 'flex', gap: spacing.sm, marginTop: spacing.sm }}>
-        <button type="button" style={button} onClick={() => window.print()}>Print</button>
-        <button type="button" style={button} onClick={() => void navigator.clipboard?.writeText(formatReceiptText(receipt))}>
-          Copy slip text
-        </button>
-      </div>
     </div>
   );
 }

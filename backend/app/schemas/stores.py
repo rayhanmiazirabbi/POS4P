@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import date, datetime
 from typing import Annotated
+from urllib.parse import urlparse
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -21,6 +24,43 @@ StoreCode = Annotated[
 Timezone = Annotated[str, Field(min_length=3, max_length=64)]
 CurrencyCode = Annotated[str, Field(min_length=3, max_length=3)]
 CutoffHour = Annotated[int, Field(ge=0, le=23)]
+ReceiptCopy = Annotated[str | None, Field(max_length=1000)]
+ReceiptContact = Annotated[str | None, Field(max_length=320)]
+ReceiptPaperWidth = Annotated[int, Field(ge=48, le=210)]
+
+RECEIPT_LOGO_MAX_BYTES = 200_000
+RECEIPT_LOGO_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+
+
+def validate_receipt_logo(value: str | None) -> str | None:
+    """Accept a remote HTTPS image or a deliberately small raster data URL."""
+    if value is None:
+        return None
+    if value.startswith("data:"):
+        if len(value) > 270_000:
+            raise ValueError("Receipt logo must be 200 KB or smaller")
+        try:
+            header, encoded = value.split(",", 1)
+            mime, encoding = header[5:].split(";", 1)
+            if mime not in RECEIPT_LOGO_MIME_TYPES or encoding != "base64":
+                raise ValueError
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("Receipt logo must be a PNG, JPEG, or WebP data URL") from exc
+        if len(decoded) > RECEIPT_LOGO_MAX_BYTES:
+            raise ValueError("Receipt logo must be 200 KB or smaller")
+        signatures = {
+            "image/png": decoded.startswith(b"\x89PNG\r\n\x1a\n"),
+            "image/jpeg": decoded.startswith(b"\xff\xd8\xff"),
+            "image/webp": decoded.startswith(b"RIFF") and decoded[8:12] == b"WEBP",
+        }
+        if not signatures[mime]:
+            raise ValueError("Receipt logo content does not match its image type")
+        return value
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.netloc or len(value) > 2048:
+        raise ValueError("Receipt logo URL must be an HTTPS URL up to 2048 characters")
+    return value
 
 
 def normalize_timezone(value: str) -> str:
@@ -46,23 +86,83 @@ class StoreSettings(ApiModel):
     downstream modules never have to branch on a missing key.
     """
 
-    receipt_header: str | None = None
-    receipt_footer: str | None = None
+    receipt_header: ReceiptCopy = None
+    receipt_footer: ReceiptCopy = None
+    receipt_logo: str | None = None
+    receipt_business_name: ReceiptContact = None
+    receipt_address: ReceiptCopy = None
+    receipt_phone: ReceiptContact = None
+    receipt_email: ReceiptContact = None
+    receipt_tax_id: ReceiptContact = None
+    receipt_paper_width_mm: ReceiptPaperWidth = 80
+    receipt_show_logo: bool = True
+    receipt_show_business_name: bool = True
+    receipt_show_store_name: bool = True
+    receipt_show_contact_details: bool = True
+    receipt_show_header: bool = True
+    receipt_show_receipt_number: bool = True
+    receipt_show_date_time: bool = True
+    receipt_show_customer: bool = True
+    receipt_show_cashier: bool = True
+    receipt_show_items: bool = True
+    receipt_show_item_quantity: bool = True
+    receipt_show_unit_price: bool = True
+    receipt_show_line_total: bool = True
+    receipt_show_subtotal: bool = True
+    receipt_show_discounts: bool = True
+    receipt_show_charges: bool = True
+    receipt_show_total: bool = True
+    receipt_show_payments: bool = True
+    receipt_show_cash_received: bool = True
+    receipt_show_change_due: bool = True
+    receipt_show_footer: bool = True
     business_day_cutoff_hour: CutoffHour = 0
     low_stock_alerts: bool = True
     allow_offline_sales: bool = True
     print_receipt_by_default: bool = True
 
+    _valid_receipt_logo = field_validator("receipt_logo")(validate_receipt_logo)
+
 
 class StoreSettingsUpdate(ApiModel):
     """Partial patch: only keys present in the body are written."""
 
-    receipt_header: str | None = None
-    receipt_footer: str | None = None
+    receipt_header: ReceiptCopy = None
+    receipt_footer: ReceiptCopy = None
+    receipt_logo: str | None = None
+    receipt_business_name: ReceiptContact = None
+    receipt_address: ReceiptCopy = None
+    receipt_phone: ReceiptContact = None
+    receipt_email: ReceiptContact = None
+    receipt_tax_id: ReceiptContact = None
+    receipt_paper_width_mm: ReceiptPaperWidth | None = None
+    receipt_show_logo: bool | None = None
+    receipt_show_business_name: bool | None = None
+    receipt_show_store_name: bool | None = None
+    receipt_show_contact_details: bool | None = None
+    receipt_show_header: bool | None = None
+    receipt_show_receipt_number: bool | None = None
+    receipt_show_date_time: bool | None = None
+    receipt_show_customer: bool | None = None
+    receipt_show_cashier: bool | None = None
+    receipt_show_items: bool | None = None
+    receipt_show_item_quantity: bool | None = None
+    receipt_show_unit_price: bool | None = None
+    receipt_show_line_total: bool | None = None
+    receipt_show_subtotal: bool | None = None
+    receipt_show_discounts: bool | None = None
+    receipt_show_charges: bool | None = None
+    receipt_show_total: bool | None = None
+    receipt_show_payments: bool | None = None
+    receipt_show_cash_received: bool | None = None
+    receipt_show_change_due: bool | None = None
+    receipt_show_footer: bool | None = None
     business_day_cutoff_hour: CutoffHour | None = None
     low_stock_alerts: bool | None = None
     allow_offline_sales: bool | None = None
     print_receipt_by_default: bool | None = None
+
+    _valid_receipt_logo = field_validator("receipt_logo")(validate_receipt_logo)
 
 
 class StoreCreateRequest(ApiModel):
