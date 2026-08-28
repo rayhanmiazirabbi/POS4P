@@ -119,6 +119,7 @@ class ShelfItemResponse(StoreProductResponse):
     """
 
     name: str
+    unit: str
     barcode: str | None
     generic_name: str | None = None
     strength: str | None = None
@@ -126,6 +127,7 @@ class ShelfItemResponse(StoreProductResponse):
     dosage_form: str | None = None
     manufacturer_id: UUID | None = None
     manufacturer: str | None = None
+    available_quantity: Decimal = Decimal(0)
 
 
 class StoreProductPriceResponse(ApiModel):

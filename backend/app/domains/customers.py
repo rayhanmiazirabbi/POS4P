@@ -23,6 +23,7 @@ class Customer(OrganizationScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Bas
     normalized_phone: Mapped[str | None] = mapped_column(String(32))
     email: Mapped[str | None] = mapped_column(String(254))
     due_balance: Mapped[Decimal] = mapped_column(money_column(), default=0, nullable=False)
+    advance_balance: Mapped[Decimal] = mapped_column(money_column(), default=0, nullable=False)
     preferences: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

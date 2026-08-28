@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import Field, NonNegativeInt, field_validator
+from pydantic import Field, NonNegativeInt, field_validator, model_validator
 
 from app.schemas.base import ApiModel
 
@@ -111,6 +111,66 @@ class MovementResponse(ApiModel):
 
 class ReceiveBatchResponse(ApiModel):
     batch: MovementBatchPayload
+    movement: MovementResponse
+    balance: BalanceResponse
+
+
+class IntakeCustomProduct(ApiModel):
+    name: Annotated[str, Field(min_length=1, max_length=240)]
+    unit: Annotated[str, Field(min_length=1, max_length=40)]
+    barcode: Annotated[str | None, Field(min_length=1, max_length=64)] = None
+
+
+class IntakeShelf(ApiModel):
+    sale_price: Annotated[Decimal | None, Field(ge=0, decimal_places=2)] = None
+    sku: Annotated[str | None, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")] = None
+    barcode: Annotated[str | None, Field(min_length=1, max_length=64)] = None
+    rack: Annotated[str | None, Field(min_length=1, max_length=80)] = None
+    minimum_stock: Annotated[Decimal | None, Field(ge=0)] = None
+
+
+class InventoryIntakeRequest(ApiModel):
+    source: Literal["opening_stock", "supplier_receive"]
+    store_product_id: UUID | None = None
+    pharmacy_product_id: UUID | None = None
+    catalog_product_id: UUID | None = None
+    custom_product: IntakeCustomProduct | None = None
+    shelf: IntakeShelf = Field(default_factory=IntakeShelf)
+    quantity: Quantity
+    unit_cost: UnitCost | None = None
+    batch_number: BatchNumber | None = None
+    expiry_date: date | None = None
+    supplier_id: UUID | None = None
+    reference: Annotated[str | None, Field(max_length=160)] = None
+
+    @model_validator(mode="after")
+    def validate_intake(self) -> InventoryIntakeRequest:
+        identities = (
+            self.store_product_id,
+            self.pharmacy_product_id,
+            self.catalog_product_id,
+            self.custom_product,
+        )
+        if sum(value is not None for value in identities) != 1:
+            raise ValueError("Provide exactly one product identity")
+        if self.source == "supplier_receive" and self.unit_cost is None:
+            raise ValueError("Supplier receipts require unitCost")
+        if self.store_product_id is None and self.shelf.sale_price is None:
+            raise ValueError("New shelf items require salePrice")
+        return self
+
+
+class InventoryIntakeResponse(ApiModel):
+    store_product_id: UUID
+    pharmacy_product_id: UUID
+    name: str
+    sku: str
+    barcode: str | None
+    sale_price: Decimal
+    rack: str | None
+    unit: str
+    adopted: bool
+    batch: BatchResponse
     movement: MovementResponse
     balance: BalanceResponse
 

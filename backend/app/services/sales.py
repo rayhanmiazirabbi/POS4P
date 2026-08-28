@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
-from decimal import Decimal
+from datetime import timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -15,6 +18,7 @@ from app.domains.inventory import (
     InventoryMovementType,
 )
 from app.domains.sales import (
+    DiscountApproval,
     Sale,
     SaleChannel,
     SaleItem,
@@ -24,8 +28,9 @@ from app.domains.sales import (
 )
 from app.domains.sync import StoreSequence
 from app.errors import Conflict, Forbidden, NotFound, ValidationError
-from app.models import Role, StoreProduct
-from app.security import as_utc, utc_now
+from app.models import Organization, OrganizationUser, RecordStatus, Role, StoreProduct, User
+from app.schemas.organizations import OrganizationSettings
+from app.security import as_utc, generate_token, hash_token, utc_now, verify_secret
 from app.services.audit import enqueue_outbox, record_audit, redact
 from app.services.customers import load_customer
 from app.services.idempotency import remember, replay
@@ -35,8 +40,10 @@ from app.services.inventory import (
     allocate_fefo_for_product,
     load_store_product,
 )
+from app.services.organizations import coerce_settings
 from app.services.payments import create_sale_payment, refund_payments
 from app.services.stores import business_date, load_store
+from app.services.users import normalize_phone
 
 STAFF_ROLES = frozenset({Role.OWNER, Role.MANAGER, Role.CASHIER})
 VOID_ROLES = frozenset({Role.OWNER, Role.MANAGER})
@@ -121,6 +128,146 @@ def compute_totals(lines: list[tuple[Decimal, Decimal]], discount: Decimal) -> t
     return subtotal, discount, total
 
 
+def _discount_amount(base: Decimal, discount: Any | None) -> Decimal:
+    if discount is None or Decimal(discount.value) == 0:
+        return Decimal("0.00")
+    value = Decimal(discount.value)
+    if discount.mode == "percentage":
+        if value > 100:
+            raise ValidationError("Percentage discount cannot exceed 100")
+        amount = (base * value / Decimal(100)).quantize(CENT, rounding=ROUND_HALF_UP)
+    else:
+        amount = value.quantize(CENT)
+    if amount > base:
+        raise ValidationError("Flat discount cannot exceed its eligible subtotal")
+    return amount
+
+
+@dataclass(frozen=True)
+class StructuredTotals:
+    subtotal: Decimal
+    line_discounts: list[Decimal]
+    line_discount: Decimal
+    global_discount: Decimal
+    delivery_charge: Decimal
+    other_fee: Decimal
+    other_fee_label: str | None
+    total: Decimal
+
+
+def structured_totals(payload: Any, products: list[StoreProduct]) -> StructuredTotals:
+    gross = [
+        (Decimal(line.quantity) * Decimal(product.sale_price)).quantize(CENT)
+        for line, product in zip(payload.items, products)
+    ]
+    line_discounts = [
+        _discount_amount(line_total, line.discount)
+        for line_total, line in zip(gross, payload.items)
+    ]
+    after_lines = sum(
+        (line_total - discount for line_total, discount in zip(gross, line_discounts)),
+        Decimal(0),
+    ).quantize(CENT)
+    if payload.global_discount is not None:
+        global_discount = _discount_amount(after_lines, payload.global_discount)
+    else:
+        global_discount = Decimal(payload.discount).quantize(CENT)
+        if global_discount > after_lines:
+            raise ValidationError("Discount cannot exceed the sale subtotal")
+
+    delivery = Decimal(0)
+    other = Decimal(0)
+    other_label: str | None = None
+    seen: set[str] = set()
+    for charge in payload.charges:
+        if charge.kind in seen:
+            raise ValidationError(f"Only one {charge.kind} charge is allowed")
+        seen.add(charge.kind)
+        if charge.kind == "delivery":
+            delivery = Decimal(charge.amount).quantize(CENT)
+        else:
+            other = Decimal(charge.amount).quantize(CENT)
+            other_label = charge.label
+    total = (after_lines - global_discount + delivery + other).quantize(CENT)
+    return StructuredTotals(
+        subtotal=sum(gross, Decimal(0)).quantize(CENT),
+        line_discounts=line_discounts,
+        line_discount=sum(line_discounts, Decimal(0)).quantize(CENT),
+        global_discount=global_discount,
+        delivery_charge=delivery,
+        other_fee=other,
+        other_fee_label=other_label,
+        total=total,
+    )
+
+
+def discount_fingerprint(value: Any) -> str:
+    data = value.model_dump(
+        by_alias=True,
+        mode="json",
+        include={"items", "discount", "global_discount", "charges"},
+    )
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+async def approve_discount(session: AsyncSession, context: RequestContext, payload: Any) -> tuple[str, DiscountApproval, User]:
+    if context.store_id is None:
+        raise ValidationError("Store context required", code="STORE_CONTEXT_REQUIRED")
+    user = await session.scalar(
+        select(User)
+        .join(OrganizationUser, OrganizationUser.user_id == User.id)
+        .where(
+            User.phone == normalize_phone(payload.phone),
+            User.status == RecordStatus.ACTIVE,
+            OrganizationUser.organization_id == context.organization_id,
+            OrganizationUser.active.is_(True),
+            OrganizationUser.role.in_((Role.OWNER, Role.MANAGER)),
+        )
+    )
+    if user is None or not verify_secret(user.pin_hash, payload.pin):
+        raise Forbidden("Owner or manager approval PIN is incorrect")
+    token = generate_token()
+    now = utc_now()
+    approval = DiscountApproval(
+        organization_id=context.organization_id,
+        store_id=context.store_id,
+        token_hash=hash_token(token),
+        fingerprint=discount_fingerprint(payload),
+        approved_by_user_id=user.id,
+        expires_at=now + timedelta(minutes=5),
+        created_at=now,
+    )
+    session.add(approval)
+    await session.commit()
+    return token, approval, user
+
+
+async def _authorize_discount(session: AsyncSession, context: RequestContext, payload: Any, total_discount: Decimal) -> None:
+    if total_discount <= 0:
+        return
+    organization = await session.get(Organization, context.organization_id)
+    settings = coerce_settings(OrganizationSettings, organization.settings if organization else None)
+    if not settings.require_pin_for_discounts:
+        return
+    if not payload.discount_approval_token:
+        raise Forbidden("A manager PIN approval is required for this discount")
+    approval = await session.scalar(
+        select(DiscountApproval).where(
+            DiscountApproval.organization_id == context.organization_id,
+            DiscountApproval.store_id == context.store_id,
+            DiscountApproval.token_hash == hash_token(payload.discount_approval_token),
+        )
+    )
+    if (
+        approval is None
+        or approval.consumed_at is not None
+        or (as_utc(approval.expires_at) or utc_now()) <= utc_now()
+        or approval.fingerprint != discount_fingerprint(payload)
+    ):
+        raise Forbidden("Discount approval is invalid, expired, or belongs to a changed cart")
+    approval.consumed_at = utc_now()
+
+
 def allocate_discount(line_totals: list[Decimal], discount: Decimal) -> list[Decimal]:
     """Split a sale-level discount across lines in proportion to their line totals.
 
@@ -176,8 +323,9 @@ async def create_sale(
     if stored is not None:
         return SaleCreated(sale=Sale(id=UUID(stored["id"])), replay_body=stored)
 
+    customer = None
     if payload.customer_id is not None:
-        await load_customer(session, context, payload.customer_id)
+        customer = await load_customer(session, context, payload.customer_id)
 
     products_by_line: list[StoreProduct] = []
     for line in payload.items:
@@ -185,10 +333,19 @@ async def create_sale(
             await load_store_product(session, context, line.store_product_id)
         )
 
-    subtotal, discount, total = compute_totals(
-        [(line.quantity, Decimal(product.sale_price)) for line, product in zip(payload.items, products_by_line)],
-        payload.discount,
+    totals = structured_totals(payload, products_by_line)
+    discount = totals.line_discount + totals.global_discount
+    await _authorize_discount(session, context, payload, discount)
+    advance = (
+        Decimal(payload.advance_application.amount).quantize(CENT)
+        if payload.advance_application is not None
+        else Decimal("0.00")
     )
+    if advance > 0 and customer is None:
+        raise ValidationError("Advance applications require a customer")
+    if advance > totals.total:
+        raise ValidationError("Advance cannot exceed the sale total")
+    amount_due_now = (totals.total - advance).quantize(CENT)
 
     # Allocate every line first so one shortfall aborts before any write.
     allocations_by_line: list[list[Any]] = []
@@ -207,9 +364,16 @@ async def create_sale(
         customer_id=payload.customer_id,
         channel=SaleChannel.POS,
         status=SaleStatus.COMPLETED,
-        subtotal=subtotal,
+        subtotal=totals.subtotal,
         discount=discount,
-        total=total,
+        line_discount=totals.line_discount,
+        global_discount=totals.global_discount,
+        delivery_charge=totals.delivery_charge,
+        other_fee_label=totals.other_fee_label,
+        other_fee=totals.other_fee,
+        advance_applied=advance,
+        advance_reference=(payload.advance_application.reference if payload.advance_application else None),
+        total=totals.total,
         idempotency_key=idempotency_key,
         receipt_number=await _next_receipt_number(session, context.store_id),
         created_at=now,
@@ -222,14 +386,20 @@ async def create_sale(
         raise Conflict("Sale could not be created") from exc
 
     items: list[SaleItem] = []
-    for line, product, allocations in zip(payload.items, products_by_line, allocations_by_line):
+    for line, product, allocations, line_discount in zip(
+        payload.items, products_by_line, allocations_by_line, totals.line_discounts
+    ):
+        gross_line_total = (Decimal(line.quantity) * Decimal(product.sale_price)).quantize(CENT)
         item = SaleItem(
             sale_id=sale.id,
             store_product_id=line.store_product_id,
             product_name=product.sku,
             quantity=line.quantity,
             unit_price=Decimal(product.sale_price).quantize(CENT),
-            line_total=(Decimal(line.quantity) * Decimal(product.sale_price)).quantize(CENT),
+            discount_mode=line.discount.mode if line.discount is not None else None,
+            discount_value=Decimal(line.discount.value) if line.discount is not None else Decimal(0),
+            discount_amount=line_discount,
+            line_total=gross_line_total,
         )
         session.add(item)
         await session.flush()
@@ -264,9 +434,9 @@ async def create_sale(
         )
         payments.append(payment)
         paid += Decimal(tender.amount)
-    if paid.quantize(CENT) != total:
+    if paid.quantize(CENT) != amount_due_now:
         await session.rollback()
-        raise Conflict("Payments must add up to the sale total")
+        raise Conflict("Payments must add up to the amount due after advance")
 
     record_audit(
         session,
@@ -275,7 +445,7 @@ async def create_sale(
         entity_type="sale",
         entity_id=sale.id,
         request_id=request_id,
-        after=redact({"total": str(total), "customer_id": str(payload.customer_id)}),
+        after=redact({"total": str(totals.total), "advance": str(advance), "customer_id": str(payload.customer_id)}),
     )
     enqueue_outbox(
         session,
@@ -286,7 +456,7 @@ async def create_sale(
         payload={
             "sale_id": str(sale.id),
             "store_id": str(sale.store_id),
-            "total": str(total),
+            "total": str(totals.total),
             "receipt_number": sale.receipt_number,
         },
     )
@@ -488,18 +658,18 @@ def _restored_quantities(
     return restored
 
 
-def _net_by_product(items: list[SaleItem], discount: Decimal) -> dict[UUID, Decimal]:
+def _net_by_product(items: list[SaleItem], global_discount: Decimal) -> dict[UUID, Decimal]:
     """What each store product was actually worth after the sale-level discount.
 
     ``sales.discount`` is a single figure against the whole cart, so a line's own
     share of it has to be re-derived; :func:`allocate_discount` does that the same
     way the clients do when they print the receipt.
     """
-    lines = [Decimal(item.line_total) for item in items]
+    lines = [Decimal(item.line_total) - Decimal(item.discount_amount) for item in items]
     net: dict[UUID, Decimal] = {}
-    for item, share in zip(items, allocate_discount(lines, discount)):
+    for item, line_net, share in zip(items, lines, allocate_discount(lines, global_discount)):
         net[item.store_product_id] = (
-            net.get(item.store_product_id, Decimal(0)) + Decimal(item.line_total) - share
+            net.get(item.store_product_id, Decimal(0)) + line_net - share
         )
     return net
 
@@ -553,6 +723,7 @@ def sale_return_body(sale_return: SaleReturn) -> dict[str, Any]:
         sale_id=sale_return.sale_id,
         reason=sale_return.reason,
         total=Decimal(sale_return.total),
+        advance_restored=Decimal(sale_return.advance_restored),
         created_at=sale_return.created_at,
     )
     return json.loads(body.model_dump_json(by_alias=True))
@@ -624,7 +795,7 @@ async def create_sale_return(
         requested[product_id] = requested.get(product_id, Decimal(0)) + Decimal(line.quantity)
 
     refund_total = _refund_amount(
-        _net_by_product(item_rows, Decimal(sale.discount)), sold, returned, requested
+        _net_by_product(item_rows, Decimal(sale.global_discount)), sold, returned, requested
     )
 
     try:
@@ -643,12 +814,21 @@ async def create_sale_return(
         raise Conflict("Insufficient stock capacity to process the return") from exc
 
     now = utc_now()
+    prior_advance_restored = sum(
+        await session.scalars(select(SaleReturn.advance_restored).where(SaleReturn.sale_id == sale.id)),
+        Decimal(0),
+    )
+    advance_restored = min(
+        refund_total,
+        max(Decimal(sale.advance_applied) - Decimal(prior_advance_restored), Decimal(0)),
+    ).quantize(CENT)
     sale_return = SaleReturn(
         organization_id=sale.organization_id,
         store_id=sale.store_id,
         sale_id=sale.id,
         reason=payload.reason.strip(),
         total=(-refund_total).quantize(CENT),
+        advance_restored=advance_restored,
         idempotency_key=idempotency_key,
         created_at=now,
     )
@@ -661,15 +841,21 @@ async def create_sale_return(
 
     # The refund is booked against the tenders it came in on, which is what keeps
     # the customer's due balance and the day's payment mix derivable from the ledger.
-    await refund_payments(
-        session,
-        context,
-        await _load_payments(session, sale.id),
-        refund_total,
-        reason=sale_return.reason,
-        request_id=request_id,
-        key_prefix=f"return:{sale_return.id}",
-    )
+    if advance_restored > 0:
+        assert sale.customer_id is not None
+        customer = await load_customer(session, context, sale.customer_id)
+        customer.advance_balance = Decimal(customer.advance_balance) + advance_restored
+    tender_refund = refund_total - advance_restored
+    if tender_refund > 0:
+        await refund_payments(
+            session,
+            context,
+            await _load_payments(session, sale.id),
+            tender_refund,
+            reason=sale_return.reason,
+            request_id=request_id,
+            key_prefix=f"return:{sale_return.id}",
+        )
 
     record_audit(
         session,
@@ -779,15 +965,20 @@ async def void_sale(
 
     # A voided sale leaves every revenue report, so any credit it created has to
     # go with it -- otherwise the customer owes for a transaction the books deny.
-    await refund_payments(
-        session,
-        context,
-        await _load_payments(session, sale.id),
-        Decimal(sale.total),
-        reason=f"void: {sale.void_reason}",
-        request_id=request_id,
-        key_prefix=f"void:{sale.id}",
-    )
+    tender_total = Decimal(sale.total) - Decimal(sale.advance_applied)
+    if tender_total > 0:
+        await refund_payments(
+            session,
+            context,
+            await _load_payments(session, sale.id),
+            tender_total,
+            reason=f"void: {sale.void_reason}",
+            request_id=request_id,
+            key_prefix=f"void:{sale.id}",
+        )
+    if Decimal(sale.advance_applied) > 0 and sale.customer_id is not None:
+        customer = await load_customer(session, context, sale.customer_id)
+        customer.advance_balance = Decimal(customer.advance_balance) + Decimal(sale.advance_applied)
 
     record_audit(
         session,
@@ -833,6 +1024,14 @@ def sale_body(sale: Sale, items: list[SaleItem], payments: list[Any]) -> dict[st
         status=sale.status,
         subtotal=Decimal(sale.subtotal),
         discount=Decimal(sale.discount),
+        line_discount=Decimal(sale.line_discount),
+        global_discount=Decimal(sale.global_discount),
+        delivery_charge=Decimal(sale.delivery_charge),
+        other_fee_label=sale.other_fee_label,
+        other_fee=Decimal(sale.other_fee),
+        advance_applied=Decimal(sale.advance_applied),
+        advance_reference=sale.advance_reference,
+        amount_due_now=(Decimal(sale.total) - Decimal(sale.advance_applied)).quantize(CENT),
         total=Decimal(sale.total),
         receipt_number=sale.receipt_number,
         void_reason=sale.void_reason,
@@ -844,6 +1043,9 @@ def sale_body(sale: Sale, items: list[SaleItem], payments: list[Any]) -> dict[st
                 product_name=item.product_name,
                 quantity=Decimal(item.quantity),
                 unit_price=Decimal(item.unit_price),
+                discount_mode=item.discount_mode,
+                discount_value=Decimal(item.discount_value),
+                discount_amount=Decimal(item.discount_amount),
                 line_total=Decimal(item.line_total),
             )
             for item in items

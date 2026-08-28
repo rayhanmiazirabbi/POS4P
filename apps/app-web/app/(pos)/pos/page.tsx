@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { SaleCreateRequest } from '@pharmacy/api';
+import type { DiscountInput, InventoryIntake, SaleChargeInput, SaleCreateRequest } from '@pharmacy/api';
 import {
   calculateSaleTotals,
   formatReceiptText,
@@ -33,12 +33,15 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 
 import { pharmacyApi } from '@/lib/api';
+import { IntakeDrawer } from '@/components/intake-drawer';
+import { MedicineFinder, type MedicineSelection } from '@/components/medicine-finder';
+import { amountDueNow, calculateCheckout } from '@/lib/checkout';
+import { decimalEntry } from '@/lib/numeric-input';
 import { flushQueue, forgetSale, queueSale, queueStatus, recoverOutbox, type SaleQueueStatus } from '@/lib/offlineQueue';
+import { draftHasItems, usePosDrafts, type CartLine, type PosDraft } from '@/lib/pos-drafts';
 import { usePosUi } from '@/lib/pos-ui';
 import { useSession } from '@/lib/session';
 import { shelf } from '@/lib/shelf';
-
-type CartLine = { storeProductId: string; sku: string; name: string; quantity: number; unitPrice: string };
 
 const card: CSSProperties = { background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: 12, padding: spacing.lg };
 const button: CSSProperties = { padding: `${spacing.sm} ${spacing.lg}`, borderRadius: 8, border: `1px solid ${colors.border}`, background: colors.surface, cursor: 'pointer', fontWeight: tokens.typography.weights.medium };
@@ -52,9 +55,32 @@ export default function PosPage(): ReactNode {
   const [query, setQuery] = useState('');
   /** The shelf row whose alternatives sub-list is open; one at a time. */
   const [altForId, setAltForId] = useState<string | null>(null);
-  const [cart, setCart] = useState<CartLine[]>([]);
-  const [customerId, setCustomerId] = useState<string | null>(null);
-  const [customerName, setCustomerName] = useState<string | null>(null);
+  const draft = usePosDrafts((state) => state.active);
+  const heldCarts = usePosDrafts((state) => state.held);
+  const draftStatus = usePosDrafts((state) => state.status);
+  const recoveryError = usePosDrafts((state) => state.recoveryError);
+  const draftNotice = usePosDrafts((state) => state.notice);
+  const hydrateDrafts = usePosDrafts((state) => state.hydrate);
+  const updateActive = usePosDrafts((state) => state.updateActive);
+  const holdActive = usePosDrafts((state) => state.holdActive);
+  const resumeHeld = usePosDrafts((state) => state.resumeHeld);
+  const deleteHeld = usePosDrafts((state) => state.deleteHeld);
+  const clearActive = usePosDrafts((state) => state.clearActive);
+  const reconcileActive = usePosDrafts((state) => state.reconcile);
+  const resetCorruptStorage = usePosDrafts((state) => state.resetCorruptStorage);
+  const flushDrafts = usePosDrafts((state) => state.flush);
+  const cart = draft.lines;
+  const customerId = draft.customerId;
+  const customerName = draft.customerName;
+  const globalDiscountMode = draft.globalDiscountMode;
+  const globalDiscountValue = draft.globalDiscountValue;
+  const deliveryCharge = draft.deliveryCharge;
+  const otherFeeLabel = draft.otherFeeLabel;
+  const otherFee = draft.otherFee;
+  const advance = draft.advance;
+  const advanceReference = draft.advanceReference;
+  const setDraftField = useCallback(<K extends keyof PosDraft>(key: K, value: PosDraft[K]) => updateActive((current) => ({ ...current, [key]: value })), [updateActive]);
+  const setCart = useCallback((change: CartLine[] | ((current: readonly CartLine[]) => CartLine[])) => updateActive((current) => ({ ...current, lines: typeof change === 'function' ? change(current.lines) : change })), [updateActive]);
   const cashReceived = usePosUi((state) => state.cashReceived);
   const digitalAmount = usePosUi((state) => state.digitalAmount);
   const digitalMethod = usePosUi((state) => state.digitalMethod);
@@ -67,8 +93,56 @@ export default function PosPage(): ReactNode {
   const [error, setError] = useState<string | null>(null);
   const [recovered, setRecovered] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [intakeSelection, setIntakeSelection] = useState<MedicineSelection | null>(null);
+  const [approvalOpen, setApprovalOpen] = useState(false);
+  const [approvalPhone, setApprovalPhone] = useState('');
+  const [approvalPin, setApprovalPin] = useState('');
+  const [customerSearch, setCustomerSearch] = useState('');
+  const approvalPanelRef = useRef<HTMLDivElement>(null);
+  const cashInputRef = useRef<HTMLInputElement>(null);
+  const digitalInputRef = useRef<HTMLInputElement>(null);
+  const heldRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const [confirmAction, setConfirmAction] = useState<{ kind: 'clear' } | { kind: 'delete'; id: string; label: string } | null>(null);
+
+  useEffect(() => {
+    if (draftStatus !== 'ready') return;
+    const draftNeedsCleanup = draft.lines.some((line) => line.discountValue !== decimalEntry(line.discountValue))
+      || globalDiscountValue !== decimalEntry(globalDiscountValue)
+      || deliveryCharge !== decimalEntry(deliveryCharge)
+      || otherFee !== decimalEntry(otherFee)
+      || advance !== decimalEntry(advance);
+    if (draftNeedsCleanup) {
+      updateActive((current) => ({
+        ...current,
+        lines: current.lines.map((line) => ({ ...line, discountValue: decimalEntry(line.discountValue) })),
+        globalDiscountValue: decimalEntry(current.globalDiscountValue),
+        deliveryCharge: decimalEntry(current.deliveryCharge),
+        otherFee: decimalEntry(current.otherFee),
+        advance: decimalEntry(current.advance),
+      }));
+    }
+    const safeCash = decimalEntry(cashReceived);
+    const safeDigital = decimalEntry(digitalAmount);
+    if (safeCash !== cashReceived) setCashReceived(safeCash);
+    if (safeDigital !== digitalAmount) setDigitalAmount(safeDigital);
+  }, [advance, cashReceived, deliveryCharge, digitalAmount, draft.lines, draftStatus, globalDiscountValue, otherFee, setCashReceived, setDigitalAmount, updateActive]);
 
   const storeId = user?.storeId ?? null;
+
+  useEffect(() => {
+    if (user?.organizationId && storeId) void hydrateDrafts(user.organizationId, storeId);
+  }, [hydrateDrafts, storeId, user?.organizationId]);
+
+  useEffect(() => {
+    const onPageHide = (): void => { void flushDrafts(); };
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, [flushDrafts]);
+  const settingsQuery = useQuery({
+    queryKey: ['organization', 'settings'],
+    queryFn: async () => (await pharmacyApi.organizations.readSettings()).data.settings,
+    staleTime: 60_000,
+  });
 
   // The queue read is held back until `recoverOutbox` has settled -- see the mount
   // effect below. A status taken before recovery would show a sale stranded
@@ -88,6 +162,13 @@ export default function PosPage(): ReactNode {
     // put back in line, so this runs before anything reads the queue.
     void recoverOutbox().then(() => setRecovered(true), () => setRecovered(true));
   }, []);
+
+  useEffect(() => {
+    if (!approvalOpen) return;
+    const previous = document.activeElement as HTMLElement | null;
+    approvalPanelRef.current?.querySelector<HTMLInputElement>('input')?.focus();
+    return () => previous?.focus();
+  }, [approvalOpen]);
 
   const shelfLoad = useQuery({
     queryKey: ['pos', 'shelf', storeId],
@@ -109,6 +190,10 @@ export default function PosPage(): ReactNode {
     [shelfLoad.data],
   );
 
+  useEffect(() => {
+    if (draftStatus === 'ready' && shelfLoad.data !== undefined && shelfLoad.data.status !== 'unavailable') reconcileActive(products);
+  }, [draft.updatedAt, draftStatus, products, reconcileActive, shelfLoad.data]);
+
   const refetchShelf = useCallback(() => {
     if (storeId !== null) void queryClient.invalidateQueries({ queryKey: ['pos', 'shelf', storeId] });
   }, [queryClient, storeId]);
@@ -121,12 +206,16 @@ export default function PosPage(): ReactNode {
       // sequences and per-event acks unexercised by the one client needing them.
       const result = await flushQueue(async (events) => (await pharmacyApi.sync.ingest(events)).data.acks);
       setError(result.firstError);
+      if (result.uploaded + result.duplicates > 0) {
+        refetchShelf();
+        void queryClient.invalidateQueries({ queryKey: ['inventory'] });
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Upload failed');
     } finally {
       refetchQueue();
     }
-  }, [refetchQueue]);
+  }, [queryClient, refetchQueue, refetchShelf]);
 
   useEffect(() => {
     const onOnline = (): void => {
@@ -162,9 +251,30 @@ export default function PosPage(): ReactNode {
     rowRefs.current[next]?.focus();
   }
 
+  const globalDiscount = globalDiscountValue.trim() === '' ? undefined : { mode: globalDiscountMode, value: globalDiscountValue } satisfies DiscountInput;
+  const charges = useMemo<SaleChargeInput[]>(() => [
+    ...(deliveryCharge.trim() === '' ? [] : [{ kind: 'delivery' as const, amount: deliveryCharge }]),
+    ...(otherFee.trim() === '' ? [] : [{ kind: 'other' as const, amount: otherFee, ...(otherFeeLabel.trim() ? { label: otherFeeLabel.trim() } : {}) }]),
+  ], [deliveryCharge, otherFee, otherFeeLabel]);
+  const pricing = useMemo(() => {
+    try {
+      return { data: calculateCheckout(cart.map((line) => ({
+        id: line.storeProductId, quantity: line.quantity, unitPrice: line.unitPrice,
+        ...(line.discountValue.trim() === '' ? {} : { discount: { mode: line.discountMode, value: line.discountValue } }),
+      })), globalDiscount, charges), problem: null as string | null };
+    } catch (cause) {
+      const fallback = calculateCheckout(cart.map((line) => ({ id: line.storeProductId, quantity: line.quantity, unitPrice: line.unitPrice })));
+      return { data: fallback, problem: cause instanceof Error ? cause.message : 'Check the sale adjustments' };
+    }
+  }, [cart, globalDiscountMode, globalDiscountValue, charges]);
+  const dueNow = useMemo(() => {
+    try { return { amount: amountDueNow(pricing.data.total, advance), problem: null as string | null }; }
+    catch (cause) { return { amount: pricing.data.total, problem: cause instanceof Error ? cause.message : 'Check the advance amount' }; }
+  }, [pricing.data.total, advance]);
+
   const saleLines = useMemo(
     () =>
-      cart.map((line) => ({
+      cart.map((line, index) => ({
         id: line.storeProductId,
         productId: line.storeProductId,
         // The product name, so the slip reads "Paracetamol 500mg × 2" rather than
@@ -173,13 +283,18 @@ export default function PosPage(): ReactNode {
         name: line.name,
         quantity: line.quantity,
         unitPrice: money(line.unitPrice),
-        discount: money('0.00'),
+        discount: money(pricing.data.lines[index]?.discountAmount ?? '0.00'),
         tax: money('0.00'),
       })),
-    [cart],
+    [cart, pricing.data.lines],
   );
 
-  const totals = useMemo(() => calculateSaleTotals(saleLines), [saleLines]);
+  const totals = useMemo(() => ({
+    subtotal: money(pricing.data.subtotal),
+    discount: money(String((Number(pricing.data.lineDiscount) + Number(pricing.data.globalDiscount)).toFixed(2))),
+    tax: money(String((Number(pricing.data.deliveryCharge) + Number(pricing.data.otherFee)).toFixed(2))),
+    total: money(pricing.data.total), paid: money('0.00'), due: money('0.00'),
+  }), [pricing.data]);
 
   const receiptHeader = { organizationName: user?.organizationName ?? '', storeName: user?.storeName ?? '', customerName };
 
@@ -189,8 +304,41 @@ export default function PosPage(): ReactNode {
       if (existing) {
         return current.map((line) => (line.storeProductId === product.id ? { ...line, quantity: line.quantity + 1 } : line));
       }
-      return [...current, { storeProductId: product.id, sku: product.sku, name: product.name, quantity: 1, unitPrice: product.salePrice }];
+      return [...current, { storeProductId: product.id, sku: product.sku, name: product.name, unit: product.unit ?? 'unit', quantity: 1, unitPrice: product.salePrice, discountMode: 'percentage', discountValue: '' }];
     });
+  }
+
+  function selectMedicine(selection: MedicineSelection): void {
+    if (selection.kind === 'local') {
+      if (selection.item.availableQuantity === undefined || Number(selection.item.availableQuantity) > 0) addToCart(selection.item);
+      else setIntakeSelection(selection);
+      return;
+    }
+    if (selection.kind === 'catalog' && selection.item.shopStatus === 'on_shelf' && selection.item.storeProductId && selection.item.salePrice && Number(selection.item.availableQuantity ?? 0) > 0) {
+      addToCart({
+        id: selection.item.storeProductId, sku: selection.item.sku ?? '', name: selection.item.name,
+        unit: selection.item.packageUnit ?? 'unit', salePrice: selection.item.salePrice,
+        barcode: selection.item.barcode ?? null, rack: null,
+      });
+      return;
+    }
+    setIntakeSelection(selection);
+  }
+
+  function adoptIntoCart(intake: InventoryIntake): void {
+    addToCart({
+      id: intake.storeProductId, sku: intake.sku, name: intake.name, unit: intake.unit,
+      salePrice: intake.salePrice, barcode: intake.barcode ?? null, rack: intake.rack ?? null,
+      availableQuantity: intake.balance.available,
+    });
+    setIntakeSelection(null);
+    refetchShelf();
+    void queryClient.invalidateQueries({ queryKey: ['inventory'] });
+    void queryClient.invalidateQueries({ queryKey: ['catalogue'] });
+  }
+
+  function setLineDiscount(storeProductId: string, change: Partial<Pick<CartLine, 'discountMode' | 'discountValue'>>): void {
+    setCart((current) => current.map((line) => line.storeProductId === storeProductId ? { ...line, ...change } : line));
   }
 
   /**
@@ -227,16 +375,23 @@ export default function PosPage(): ReactNode {
   }
 
   function clearCart(): void {
-    setCart([]);
+    clearActive();
     resetTender();
-    setCustomerId(null);
-    setCustomerName(null);
   }
 
-  const split = splitTender(totals.total.amount, cashReceived, digitalAmount);
+  const split = splitTender(dueNow.amount, cashReceived, digitalAmount);
 
-  async function checkout(): Promise<void> {
+  async function checkout(approvalToken?: string): Promise<void> {
     if (cart.length === 0 || user === null) return;
+    if (cart.some((line) => line.unavailable)) { setError('Remove unavailable items before checkout.'); return; }
+    if (pricing.problem || dueNow.problem) { setError(pricing.problem ?? dueNow.problem); return; }
+    if (Number(advance || 0) > 0 && customerId === null) { setError('Select a customer before applying an advance.'); return; }
+    const hasStructuredDiscount = Number(pricing.data.lineDiscount) > 0 || Number(pricing.data.globalDiscount) > 0;
+    if (hasStructuredDiscount && settingsQuery.data?.requirePinForDiscounts && approvalToken === undefined) {
+      if (!navigator.onLine) { setError('Discount approval requires an internet connection. Remove the discount or reconnect.'); return; }
+      setApprovalOpen(true);
+      return;
+    }
     if (!split.readable) {
       // Refusing beats guessing. The float parser this replaces turned an
       // unreadable field into 0.00 and carried on, so a mistyped digital amount
@@ -253,7 +408,7 @@ export default function PosPage(): ReactNode {
       // Checked before posting because every one of these is a refusal the server
       // makes after the fact -- by which point the cart is cleared and the customer
       // is walking away. `Due payments require a customer` is the one a counter hits.
-      validateSalePayments(payments, totals.total, { hasCustomer: customerId !== null });
+      validateSalePayments(payments, money(dueNow.amount), { hasCustomer: customerId !== null });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The tendered amounts do not add up');
       setBusy(false);
@@ -261,11 +416,19 @@ export default function PosPage(): ReactNode {
     }
 
     const body: SaleCreateRequest = {
-      items: cart.map((line) => ({ storeProductId: line.storeProductId, quantity: String(line.quantity) })),
+      items: cart.map((line) => ({
+        storeProductId: line.storeProductId,
+        quantity: String(line.quantity),
+        ...(line.discountValue.trim() === '' ? {} : { discount: { mode: line.discountMode, value: line.discountValue } }),
+      })),
       payments: wirePayments(payments),
       ...(customerId === null ? {} : { customerId }),
-      subtotal: totals.subtotal.amount,
-      total: totals.total.amount,
+      ...(globalDiscount === undefined ? {} : { globalDiscount }),
+      ...(charges.length === 0 ? {} : { charges }),
+      ...(advance.trim() === '' || Number(advance) === 0 ? {} : { advanceApplication: { amount: advance, ...(advanceReference.trim() ? { reference: advanceReference.trim() } : {}) } }),
+      ...(approvalToken === undefined ? {} : { discountApprovalToken: approvalToken }),
+      subtotal: pricing.data.subtotal,
+      total: pricing.data.total,
     };
     const idempotencyKey = newIdempotencyKey();
 
@@ -274,6 +437,8 @@ export default function PosPage(): ReactNode {
         const response = await pharmacyApi.sales.create(body, { idempotencyKey });
         setReceipt(receiptFromSale(response.data, receiptHeader));
         clearCart();
+        refetchShelf();
+        void queryClient.invalidateQueries({ queryKey: ['inventory'] });
       } else {
         throw { code: 'NETWORK_ERROR' };
       }
@@ -292,7 +457,12 @@ export default function PosPage(): ReactNode {
           // The customer still gets a slip. It carries no receipt number, because
           // that number is the server's to assign and one invented here would later
           // belong to a different sale.
-          setReceipt(provisionalReceipt({ ...receiptHeader, issuedAt: new Date().toISOString(), lines: saleLines, payments }));
+          setReceipt(provisionalReceipt({
+            ...receiptHeader, issuedAt: new Date().toISOString(), lines: saleLines, payments,
+            total: money(pricing.data.total), deliveryCharge: money(pricing.data.deliveryCharge),
+            otherFeeLabel: otherFeeLabel.trim() || null, otherFee: money(pricing.data.otherFee),
+            advanceApplied: money(advance.trim() || '0.00'), advanceReference: advanceReference.trim() || null,
+          }));
           setError('Offline — sale queued. It will upload automatically when the connection returns.');
           clearCart();
         } catch {
@@ -313,14 +483,31 @@ export default function PosPage(): ReactNode {
     }
   }
 
+  async function approveAndCheckout(): Promise<void> {
+    if (!approvalPhone.trim() || !approvalPin.trim()) { setError('Enter the approving manager phone and PIN.'); return; }
+    setBusy(true); setError(null);
+    try {
+      const draft = {
+        phone: approvalPhone.trim(), pin: approvalPin,
+        items: cart.map((line) => ({ storeProductId: line.storeProductId, quantity: String(line.quantity), ...(line.discountValue.trim() ? { discount: { mode: line.discountMode, value: line.discountValue } } : {}) })),
+        ...(globalDiscount === undefined ? {} : { globalDiscount }),
+        ...(charges.length === 0 ? {} : { charges }),
+      };
+      const approval = await pharmacyApi.sales.approveDiscount(draft);
+      setApprovalOpen(false); setApprovalPin('');
+      await checkout(approval.data.token);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Discount approval failed');
+    } finally { setBusy(false); }
+  }
+
   async function findCustomer(term: string): Promise<void> {
     if (term.trim() === '') return;
     try {
       const page = await pharmacyApi.customers.search({ q: term.trim() }, { limit: 5 });
       const match = page.items[0];
       if (match) {
-        setCustomerId(match.id);
-        setCustomerName(`${match.name}${match.normalizedPhone ? ` · ${match.normalizedPhone}` : ''}`);
+        updateActive((current) => ({ ...current, customerId: match.id, customerName: `${match.name}${match.normalizedPhone ? ` · ${match.normalizedPhone}` : ''}` }));
         setError(null);
       } else {
         setError('No customer matched that name or phone');
@@ -332,200 +519,159 @@ export default function PosPage(): ReactNode {
 
   const queue: SaleQueueStatus = queueQuery.data ?? emptyQueue;
   const queueProblem = queueQuery.isError && queueQuery.error instanceof Error ? queueQuery.error.message : null;
+  const hasUnavailable = cart.some((line) => line.unavailable);
+
+  function holdCurrentCart(): void {
+    if (!holdActive()) { setError('Add an item before holding this cart.'); return; }
+    resetTender();
+    setError(null);
+    document.querySelector<HTMLInputElement>('[aria-label="Search medicines"]')?.focus();
+  }
+
+  function resumeCart(id: string): void {
+    if (!resumeHeld(id)) return;
+    resetTender();
+    setError(null);
+  }
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (document.querySelector('[aria-modal="true"]')) return;
+      const editable = event.target instanceof HTMLElement && event.target.matches('input, textarea, select, [contenteditable="true"]');
+      if (event.key === '/' && !editable && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault();
+        document.querySelector<HTMLInputElement>('[aria-label="Search medicines"]')?.focus();
+      } else if (event.key === 'F4') {
+        event.preventDefault(); holdCurrentCart();
+      } else if (event.key === 'F8') {
+        event.preventDefault();
+        if (heldRefs.current[0]) heldRefs.current[0].focus(); else setError('There are no held carts.');
+      } else if (event.key === 'F9') {
+        event.preventDefault(); cashInputRef.current?.focus();
+      } else if (event.key === 'F10') {
+        event.preventDefault(); digitalInputRef.current?.focus();
+      } else if (event.key === 'F12') {
+        event.preventDefault(); void checkout();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
+
+  if (storeId === null) return <main className="page-shell"><p className="status-message status-message--error">Choose a branch before opening the counter.</p></main>;
+  if (draftStatus === 'idle' || draftStatus === 'loading') return <main className="page-shell"><p className="status-message status-message--muted">Restoring carts from this terminal…</p></main>;
+  if (draftStatus === 'corrupt') return <main className="page-shell"><section className="surface surface-section"><span className="eyebrow">Cart recovery</span><h1>Saved carts need attention</h1><p className="status-message status-message--error">{recoveryError}</p><button type="button" className="primary-action" style={{ marginTop: spacing.md }} onClick={() => void resetCorruptStorage()}>Reset local carts</button></section></main>;
 
   return (
+    <>
     <main className="split-grid split-grid--counter">
-      <section style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
-        <h2 style={{ margin: 0, fontSize: tokens.typography.sizes.lg }}>Shelf</h2>
+      <section className="surface pos-shelf">
+        <header className="pos-section-header"><div><span className="eyebrow">New sale</span><h1>Find medicine</h1></div><span className="keyboard-hint">/ Search</span></header>
         {/* Said before the first click, not after the sale. A cashier quoting from a
             three-day-old price list should know that is what they are reading. */}
-        {stale !== null && <p role="status" style={{ margin: 0, color: colors.warning }}>{stale}</p>}
+        {stale !== null && <p role="status" className="status-message status-message--warning">{stale}</p>}
         {shelfLoad.data?.status === 'unavailable' && (
-          <p role="alert" style={{ margin: 0, color: colors.danger }}>{shelfLoad.data.reason}</p>
+          <p role="alert" className="status-message status-message--error">{shelfLoad.data.reason}</p>
         )}
-        <div style={{ display: 'flex', gap: spacing.xs, alignItems: 'center' }}>
-          <input
-            ref={searchRef}
-            placeholder="Scan a barcode, or search by name or SKU…"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') submitSearch();
-              else if (event.key === 'Escape') {
-                // Escape is the clear control for hands already on the keyboard;
-                // the ✕ beside the box is the same act for one on the mouse.
-                setQuery('');
-                event.currentTarget.focus();
-              } else if (event.key === 'ArrowDown') {
-                event.preventDefault();
-                focusRow(0);
-              }
-            }}
-            style={{ flex: 1, padding: spacing.md, borderRadius: 8, border: `1px solid ${colors.border}` }}
-            autoFocus
-            aria-label="Search the shelf"
-          />
-          {query !== '' && (
-            <button type="button" style={{ ...button, padding: spacing.md }} aria-label="Clear search" onClick={() => setQuery('')}>✕</button>
-          )}
-        </div>
-        {/* Announced, not just painted: the cashier deciding whether to keep
-            typing or to read the list needs the count said out loud. */}
-        <p role="status" aria-live="polite" style={{ margin: 0, color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
-          {searching
-            ? matches.length === 0
-              ? 'No medicines match.'
-              : `${matches.length} medicine${matches.length === 1 ? '' : 's'} on this shelf match.`
-            : ''}
-        </p>
-        {searching && medicineMatchesAreFuzzy(matches) && (
-          <p role="status" style={{ margin: 0, color: colors.warning, fontSize: tokens.typography.sizes.sm }}>
-            No exact match—showing closest medicines.
-          </p>
-        )}
-        <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: spacing.sm, maxHeight: '55vh', overflowY: 'auto' }}>
-          {searching ? (
-            <>
-              {groups.map((manufacturer) => (
-                <li key={manufacturer.key}>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
-                    <h3 style={{ margin: 0, fontSize: tokens.typography.sizes.sm, color: colors.muted, fontWeight: tokens.typography.weights.semibold }}>
-                      {manufacturer.label} ({manufacturer.count})
-                    </h3>
-                    {manufacturer.dosageGroups.map((dosage) => (
-                      <div key={dosage.key} style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, paddingLeft: spacing.sm }}>
-                        <h4 style={{ margin: 0, fontSize: tokens.typography.sizes.sm, color: colors.muted, fontWeight: tokens.typography.weights.medium }}>
-                          {dosage.label} ({dosage.items.length})
-                        </h4>
-                        {dosage.items.map((entry) => (
-                          <div key={entry.item.id} style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
-                            <ShelfRow
-                              entry={entry}
-                              index={rowIndex.get(entry) ?? 0}
-                              query={query}
-                              altAvailable={(entry.item.genericName ?? '').trim() !== ''}
-                              altOpen={altForId === entry.item.id}
-                              onToggleAlt={() => setAltForId(altForId === entry.item.id ? null : entry.item.id)}
-                              onAdd={() => addToCart(entry.item)}
-                              onFocusRow={focusRow}
-                              onEscapeToInput={() => searchRef.current?.focus()}
-                              registerRef={(node) => {
-                                const index = rowIndex.get(entry);
-                                if (index !== undefined) rowRefs.current[index] = node;
-                              }}
-                            />
-                            {altForId === entry.item.id && (
-                              <AlternativeList
-                                products={products}
-                                target={entry.item}
-                                onAdd={(alternative) => {
-                                  addToCart(alternative);
-                                  setAltForId(null);
-                                }}
-                                onClose={() => setAltForId(null)}
-                              />
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                </li>
-              ))}
-              {matches.length === 0 && (
-                <li style={{ color: colors.muted }}>No products match.</li>
-              )}
-            </>
-          ) : (
-            products.map((product) => (
-              <li key={product.id}>
-                <button type="button" onClick={() => addToCart(product)} style={{ ...button, width: '100%', textAlign: 'left', display: 'flex', justifyContent: 'space-between', gap: spacing.sm }}>
-                  {/* Name first, SKU beneath. A list of bare SKUs is a list picked from
-                      memory, which is how the wrong strength gets sold. */}
-                  <span style={{ display: 'flex', flexDirection: 'column' }}>
-                    {product.name}
-                    <span style={{ color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
-                      {product.sku}
-                      {product.rack === null ? '' : ` · ${product.rack}`}
-                    </span>
-                  </span>
-                  <span style={{ color: colors.muted }}>৳{product.salePrice}</span>
-                </button>
-              </li>
-            ))
-          )}
-          {!searching && products.length === 0 && (
-            <li style={{ color: colors.muted }}>
-              No shelf cached in this browser yet — connect once to load it.
-            </li>
-          )}
-        </ul>
+        <MedicineFinder products={products} actionLabel="Add to sale" autoFocus onSelect={selectMedicine} />
+        {products.length === 0 && <p className="empty-copy">Your shelf is empty. Search the global catalogue to add the first medicine while you sell it.</p>}
       </section>
 
-      <section style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
-        <h2 style={{ margin: 0, fontSize: tokens.typography.sizes.lg }}>Cart</h2>
-        <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
-          {cart.map((line) => (
-            <li key={line.storeProductId} style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-              <span style={{ flex: 1 }}>{line.name} · ৳{line.unitPrice}</span>
-              <input
-                type="number"
-                min={0}
-                value={line.quantity}
-                onChange={(event) => setQuantity(line.storeProductId, event.target.value)}
-                style={{ width: 64, padding: spacing.xs, borderRadius: 6, border: `1px solid ${colors.border}` }}
-              />
-              <strong>৳{lineTotal(line).amount}</strong>
+      <aside className="pos-rail">
+      <section className="surface pos-cart">
+        <header className="cart-header">
+          <div className="cart-title">
+            <span className="cart-title-icon" aria-hidden="true"><PosIcon name="cart" /></span>
+            <div><h2>Cart <span>({cart.length} {cart.length === 1 ? 'item' : 'items'})</span></h2><small>Saved automatically on this terminal</small></div>
+          </div>
+          <div className="cart-header-actions">
+            <button type="button" className="quiet-action" disabled={!draftHasItems(draft)} onClick={holdCurrentCart}><PosIcon name="pause" /> <span>Hold</span> <kbd>F4</kbd></button>
+            <button type="button" className="quiet-action danger-action" disabled={!draftHasItems(draft)} onClick={() => setConfirmAction({ kind: 'clear' })}><PosIcon name="trash" /> <span>Clear</span></button>
+          </div>
+        </header>
+        {draftNotice && <p role="status" aria-live="polite" className="status-message cart-notice"><span aria-hidden="true"><PosIcon name="check" /></span>{draftNotice}</p>}
+        <ul className="cart-lines">
+          {cart.map((line, index) => (
+            <li key={line.storeProductId} className={`cart-adjustment-row${line.unavailable ? ' cart-adjustment-row--unavailable' : ''}`}>
+              <span className="line-number" aria-hidden="true">{index + 1}</span>
+              <span className="line-details"><strong>{line.name}</strong><small className={line.unavailable ? 'line-unavailable' : ''}>{line.unavailable ? 'Unavailable — remove' : `৳${line.unitPrice} / ${line.unit}`}</small></span>
+              <div className="quantity-stepper" aria-label={`Quantity for ${line.name}`}>
+                <button type="button" aria-label={`Decrease ${line.name} quantity`} disabled={line.quantity <= 1} onClick={() => setQuantity(line.storeProductId, String(line.quantity - 1))}>−</button>
+                <input type="number" min={1} value={line.quantity} onChange={(event) => setQuantity(line.storeProductId, event.target.value)} aria-label={`Quantity for ${line.name}`} />
+                <button type="button" aria-label={`Increase ${line.name} quantity`} onClick={() => setQuantity(line.storeProductId, String(line.quantity + 1))}>+</button>
+              </div>
+              <div className="line-discount-control">
+                <select aria-label={`Discount type for ${line.name}`} value={line.discountMode} onChange={(event) => setLineDiscount(line.storeProductId, { discountMode: event.target.value as DiscountInput['mode'] })}>
+                  <option value="percentage">% off</option><option value="flat">৳ off</option>
+                </select>
+                <input aria-label={`Discount for ${line.name}`} inputMode="decimal" placeholder="0" value={line.discountValue} onChange={(event) => setLineDiscount(line.storeProductId, { discountValue: decimalEntry(event.target.value) })} />
+              </div>
+              <strong className="line-total">৳{pricing.data.lines[index]?.net ?? lineTotal(line).amount}</strong>
+              <button type="button" className="line-remove" aria-label={`Remove ${line.name}`} onClick={() => setCart((current) => current.filter((entry) => entry.storeProductId !== line.storeProductId))}>×</button>
             </li>
           ))}
-          {cart.length === 0 && <li style={{ color: colors.muted }}>Empty.</li>}
+          {cart.length === 0 && <li className="cart-empty"><span aria-hidden="true">🛒</span><strong>No items in cart</strong><small>Search and add products to start a sale.</small></li>}
         </ul>
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: `1px solid ${colors.border}`, paddingTop: spacing.md }}>
-          <span>Subtotal</span>
-          <span>৳{totals.subtotal.amount}</span>
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <span>Total</span>
-          <strong style={{ fontSize: tokens.typography.sizes.lg }}>৳{totals.total.amount}</strong>
-        </div>
+        <section className="cart-totals" aria-label="Sale totals">
+          <div className="summary-row"><span>Subtotal</span><strong>৳{pricing.data.subtotal}</strong></div>
+          {pricing.data.lineDiscount !== '0.00' && <div className="summary-row summary-row--discount"><span>Line discounts</span><strong>−৳{pricing.data.lineDiscount}</strong></div>}
+          <div className="summary-row summary-row--editable">
+            <label htmlFor="global-discount-mode">Discount</label>
+            <div className="summary-discount-fields">
+              <select id="global-discount-mode" className="field" value={globalDiscountMode} onChange={(event) => setDraftField('globalDiscountMode', event.target.value as DiscountInput['mode'])}><option value="percentage">Percentage</option><option value="flat">Flat amount</option></select>
+              <input className="field" aria-label="Global discount value" inputMode="decimal" placeholder="0" value={globalDiscountValue} onChange={(event) => setDraftField('globalDiscountValue', decimalEntry(event.target.value))} />
+            </div>
+            <strong className="discount-value">−৳{pricing.data.globalDiscount}</strong>
+          </div>
+          <div className="summary-charges">
+            <label><span>Delivery charge</span><span className="money-input"><span>৳</span><input aria-label="Delivery charge" inputMode="decimal" placeholder="0.00" value={deliveryCharge} onChange={(event) => setDraftField('deliveryCharge', decimalEntry(event.target.value))} /></span></label>
+            <label><span>Other fee</span><span className="money-input"><span>৳</span><input aria-label="Other fee" inputMode="decimal" placeholder="0.00" value={otherFee} onChange={(event) => setDraftField('otherFee', decimalEntry(event.target.value))} /></span></label>
+          </div>
+          {otherFee.trim() !== '' && Number(otherFee) > 0 && <input className="field other-fee-label" aria-label="Other fee label" placeholder="Describe other fee" value={otherFeeLabel} onChange={(event) => setDraftField('otherFeeLabel', event.target.value)} />}
+          <div className="summary-total"><span>Total</span><strong>৳{pricing.data.total}</strong></div>
+        </section>
+        {pricing.problem && <p role="alert" className="form-error" style={{ margin: 0 }}>{pricing.problem}</p>}
 
-        <div style={{ display: 'flex', gap: spacing.sm }}>
-          <input
-            placeholder="Customer name or phone"
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') void findCustomer((event.target as HTMLInputElement).value);
-            }}
-            style={{ flex: 1, padding: spacing.sm, borderRadius: 8, border: `1px solid ${colors.border}` }}
-          />
+        <div className="customer-lookup">
+          <span aria-hidden="true"><PosIcon name="user" /></span>
+          <input placeholder="Customer name or phone" value={customerSearch} onChange={(event) => setCustomerSearch(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void findCustomer(customerSearch); }} />
+          <button type="button" aria-label="Find customer" disabled={!customerSearch.trim()} onClick={() => void findCustomer(customerSearch)}><PosIcon name="search" /></button>
           {customerId !== null && (
-            <button type="button" style={button} onClick={() => { setCustomerId(null); setCustomerName(null); }}>
-              {customerName ?? 'Customer'} ✕
+            <button type="button" className="selected-customer" onClick={() => updateActive((current) => ({ ...current, customerId: null, customerName: null }))}>
+              {customerName ?? 'Customer'} <span aria-hidden="true">×</span>
             </button>
           )}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.sm }}>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, fontSize: tokens.typography.sizes.sm }}>
-            Cash received
-            <input value={cashReceived} onChange={(event) => setCashReceived(event.target.value)} placeholder={totals.total.amount} inputMode="decimal" style={{ padding: spacing.sm, borderRadius: 8, border: `1px solid ${colors.border}` }} />
+        {customerId !== null && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.xs }}>
+          <label style={{ fontSize: tokens.typography.sizes.sm }}>Advance applied<input className="field" inputMode="decimal" placeholder="0.00" value={advance} onChange={(event) => setDraftField('advance', decimalEntry(event.target.value))} /></label>
+          <label style={{ fontSize: tokens.typography.sizes.sm }}>Advance reference<input className="field" placeholder="Order or receipt" value={advanceReference} onChange={(event) => setDraftField('advanceReference', event.target.value)} /></label>
+        </div>}
+        {advance.trim() !== '' && Number(advance) > 0 && <TotalRow label="Amount to collect now" value={`৳${dueNow.amount}`} />}
+        {dueNow.problem && <p role="alert" className="form-error" style={{ margin: 0 }}>{dueNow.problem}</p>}
+
+        <section className="payment-section" aria-label="Payment">
+          <label className="payment-field">
+            <span>Cash received</span>
+            <span className="payment-input"><PosIcon name="cash" /><input ref={cashInputRef} value={cashReceived} onChange={(event) => setCashReceived(decimalEntry(event.target.value))} placeholder={dueNow.amount} inputMode="decimal" /></span>
           </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, fontSize: tokens.typography.sizes.sm }}>
-            Digital ({digitalMethod}) amount
-            <input value={digitalAmount} onChange={(event) => setDigitalAmount(event.target.value)} placeholder="0.00" inputMode="decimal" style={{ padding: spacing.sm, borderRadius: 8, border: `1px solid ${colors.border}` }} />
+          <label className="payment-field">
+            <span>Digital ({digitalMethod}) amount</span>
+            <span className="payment-input"><PosIcon name="phone" /><input ref={digitalInputRef} value={digitalAmount} onChange={(event) => setDigitalAmount(decimalEntry(event.target.value))} placeholder="0.00" inputMode="decimal" /></span>
           </label>
-        </div>
-        <div style={{ display: 'flex', gap: spacing.sm }}>
+        </section>
+        <div className="payment-methods" aria-label="Digital payment method">
           {(['bkash', 'nagad'] as const).map((method) => (
-            <button key={method} type="button" onClick={() => setDigitalMethod(method)} style={{ ...button, flex: 1, background: digitalMethod === method ? colors.primary : colors.surface, color: digitalMethod === method ? colors.primaryForeground : colors.foreground }}>
-              {method}
+            <button key={method} type="button" className={digitalMethod === method ? 'payment-method payment-method--active' : 'payment-method'} aria-pressed={digitalMethod === method} onClick={() => setDigitalMethod(method)}>
+              <span className={`payment-mark payment-mark--${method}`} aria-hidden="true">{method === 'bkash' ? '➤' : '●'}</span>{method}
             </button>
           ))}
         </div>
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
-          <span>Cash ৳{split.cash} · {digitalMethod} ৳{split.digital}</span>
-          <span style={{ color: split.due === '0.00' ? colors.muted : colors.warning }}>Due ৳{split.due}</span>
+        <div className="tender-summary">
+          <span><PosIcon name="wallet" /> Cash ৳{split.cash} <i>·</i> {digitalMethod} ৳{split.digital}</span>
+          <strong className={split.due === '0.00' ? '' : 'has-due'}>Due ৳{split.due}</strong>
         </div>
         {!split.readable && (
           <p role="alert" style={{ margin: 0, color: colors.danger, fontSize: tokens.typography.sizes.sm }}>
@@ -535,14 +681,14 @@ export default function PosPage(): ReactNode {
         {/* Change is displayed, not inferred: the cashier has to know what to hand
             back, and the server records `receivedAmount` so the drawer reconciles. */}
         {split.change !== '0.00' && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: tokens.typography.weights.semibold }}>
+          <div className="change-due">
             <span>Change due</span>
-            <strong style={{ fontSize: tokens.typography.sizes.lg }}>৳{split.change}</strong>
+            <strong>৳{split.change}</strong>
           </div>
         )}
 
-        <button type="button" disabled={busy || cart.length === 0} onClick={() => void checkout()} style={{ ...button, background: colors.primary, color: colors.primaryForeground, border: 'none', padding: spacing.md }}>
-          {busy ? 'Charging…' : 'Complete sale'}
+        <button type="button" className="primary-action complete-sale" disabled={busy || cart.length === 0 || hasUnavailable || pricing.problem !== null || dueNow.problem !== null} onClick={() => void checkout()}>
+          <span>{busy ? 'Charging…' : 'Complete sale'}</span><kbd>F12</kbd>
         </button>
 
         {queueProblem !== null && <p role="alert" style={{ margin: 0, color: colors.danger }}>{queueProblem}</p>}
@@ -563,8 +709,91 @@ export default function PosPage(): ReactNode {
         {error !== null && <p role="alert" style={{ margin: 0, color: error.startsWith('Offline') ? colors.warning : colors.danger }}>{error}</p>}
         {receipt !== null && <ReceiptPanel receipt={receipt} />}
       </section>
+      <section className="surface held-carts" aria-labelledby="held-carts-title">
+        <header className="held-header"><div><span className="eyebrow">Suspended sales</span><h2 id="held-carts-title">Held carts <span>{heldCarts.length}</span></h2></div><kbd>F8</kbd></header>
+        {heldCarts.length === 0 ? <p className="empty-copy">Held carts will stack here until you resume or remove them.</p> : <ul className="held-list">
+          {heldCarts.map((held, index) => {
+            const quantity = held.draft.lines.reduce((sum, line) => sum + line.quantity, 0);
+            const total = held.draft.lines.reduce((sum, line) => sum + Number(line.unitPrice) * line.quantity, 0).toFixed(2);
+            return <li key={held.id}>
+              <button ref={(node) => { heldRefs.current[index] = node; }} type="button" className="held-main" onClick={() => resumeCart(held.id)} onKeyDown={(event) => {
+                if (event.key === 'ArrowDown') { event.preventDefault(); heldRefs.current[(index + 1) % heldCarts.length]?.focus(); }
+                else if (event.key === 'ArrowUp') { event.preventDefault(); heldRefs.current[(index - 1 + heldCarts.length) % heldCarts.length]?.focus(); }
+              }}>
+                <span><strong>{held.label}</strong><small>{quantity} item{quantity === 1 ? '' : 's'} · {new Date(held.heldAt).toLocaleString()}</small></span><b>৳{total}</b>
+              </button>
+              <button type="button" className="line-remove" aria-label={`Delete held cart ${held.label}`} onClick={() => setConfirmAction({ kind: 'delete', id: held.id, label: held.label })}>×</button>
+            </li>;
+          })}
+        </ul>}
+      </section>
+      </aside>
     </main>
+    {confirmAction && <ConfirmDialog
+      title={confirmAction.kind === 'clear' ? 'Clear active cart?' : 'Remove held cart?'}
+      message={confirmAction.kind === 'clear' ? 'This removes the active sale draft from this terminal. Held carts are not affected.' : `“${confirmAction.label}” will be removed from this terminal.`}
+      onCancel={() => setConfirmAction(null)}
+      onConfirm={() => { if (confirmAction.kind === 'clear') clearCart(); else deleteHeld(confirmAction.id); setConfirmAction(null); }}
+    />}
+    {intakeSelection && <IntakeDrawer selection={intakeSelection} source="opening_stock" onClose={() => setIntakeSelection(null)} onSaved={adoptIntoCart} />}
+    {approvalOpen && <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setApprovalOpen(false); }}>
+      <div
+        ref={approvalPanelRef}
+        className="intake-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="approval-title"
+        style={{ width: 'min(420px, 100%)' }}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') { event.preventDefault(); setApprovalOpen(false); return; }
+          if (event.key !== 'Tab') return;
+          const focusable = Array.from(approvalPanelRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? []);
+          const first = focusable[0];
+          const last = focusable.at(-1);
+          if (event.shiftKey && document.activeElement === first && last) { event.preventDefault(); last.focus(); }
+          else if (!event.shiftKey && document.activeElement === last && first) { event.preventDefault(); first.focus(); }
+        }}
+      >
+        <header><div><span className="eyebrow">Protected discount</span><h2 id="approval-title">Manager approval</h2><p>The approval expires in five minutes and is tied to this cart.</p></div><button type="button" className="quiet-action" onClick={() => setApprovalOpen(false)}>Close</button></header>
+        <div className="drawer-fields">
+          <label>Owner or manager phone<input className="field" autoFocus value={approvalPhone} onChange={(event) => setApprovalPhone(event.target.value)} /></label>
+          <label>PIN<input className="field" type="password" inputMode="numeric" value={approvalPin} onChange={(event) => setApprovalPin(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void approveAndCheckout(); }} /></label>
+          {error && <p role="alert" className="form-error">{error}</p>}
+        </div>
+        <footer><button type="button" className="quiet-action" onClick={() => setApprovalOpen(false)}>Cancel</button><button type="button" className="primary-action" disabled={busy} onClick={() => void approveAndCheckout()}>{busy ? 'Checking…' : 'Approve and complete sale'}</button></footer>
+      </div>
+    </div>}
+    </>
   );
+}
+
+function PosIcon({ name }: { name: 'cart' | 'pause' | 'trash' | 'check' | 'user' | 'search' | 'cash' | 'phone' | 'wallet' }): ReactNode {
+  const common = { className: 'pos-icon', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+  switch (name) {
+    case 'cart': return <svg {...common}><path d="M3 4h2l1.6 10.2a2 2 0 0 0 2 1.7h8.7a2 2 0 0 0 1.9-1.5L21 7H6" /><circle cx="9" cy="20" r="1" /><circle cx="18" cy="20" r="1" /></svg>;
+    case 'pause': return <svg {...common}><path d="M8 5v14M16 5v14" /></svg>;
+    case 'trash': return <svg {...common}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></svg>;
+    case 'check': return <svg {...common}><path d="m6.5 12.5 3.3 3.3 7.7-8" /></svg>;
+    case 'user': return <svg {...common}><circle cx="12" cy="8" r="3.5" /><path d="M5 20a7 7 0 0 1 14 0" /></svg>;
+    case 'search': return <svg {...common}><circle cx="10.5" cy="10.5" r="5.5" /><path d="m15 15 4 4" /></svg>;
+    case 'cash': return <svg {...common}><rect x="3" y="6" width="18" height="12" rx="2" /><circle cx="12" cy="12" r="2.5" /><path d="M6 9h.01M18 15h.01" /></svg>;
+    case 'phone': return <svg {...common}><rect x="7" y="2.5" width="10" height="19" rx="2" /><path d="M10 5h4M11 18.5h2" /></svg>;
+    case 'wallet': return <svg {...common}><path d="M4 7.5V6a2 2 0 0 1 2-2h12v4M4 7.5h15a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z" /><path d="M16 13h5" /></svg>;
+  }
+}
+
+function TotalRow({ label, value }: { label: string; value: string }): ReactNode {
+  return <div style={{ display: 'flex', justifyContent: 'space-between', color: colors.muted, fontSize: tokens.typography.sizes.sm }}><span>{label}</span><span>{value}</span></div>;
+}
+
+function ConfirmDialog({ title, message, onCancel, onConfirm }: { title: string; message: string; onCancel: () => void; onConfirm: () => void }): ReactNode {
+  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-title" onKeyDown={(event) => { if (event.key === 'Escape') onCancel(); }}>
+      <header className="dialog-header"><div><span className="eyebrow">Please confirm</span><h2 id="confirm-title">{title}</h2></div></header>
+      <p style={{ color: colors.muted, lineHeight: 1.5 }}>{message}</p>
+      <footer style={{ display: 'flex', justifyContent: 'flex-end', gap: spacing.sm }}><button type="button" className="quiet-action" onClick={onCancel}>Cancel</button><button autoFocus type="button" className="primary-action" onClick={onConfirm}>Confirm</button></footer>
+    </section>
+  </div>;
 }
 
 /**
@@ -822,6 +1051,11 @@ function ReceiptPanel({ receipt }: { receipt: ReceiptModel }): ReactNode {
           <li key={`${line.name}-${index}`}>{line.name} × {line.quantity} = ৳{line.lineTotal.amount}</li>
         ))}
       </ul>
+      {(receipt.deliveryCharge?.amount !== '0.00' || receipt.otherFee?.amount !== '0.00' || receipt.advanceApplied?.amount !== '0.00') && <div style={{ marginTop: spacing.xs, color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
+        {receipt.deliveryCharge?.amount !== '0.00' && <div>Delivery ৳{receipt.deliveryCharge?.amount}</div>}
+        {receipt.otherFee?.amount !== '0.00' && <div>{receipt.otherFeeLabel ?? 'Other fee'} ৳{receipt.otherFee?.amount}</div>}
+        {receipt.advanceApplied?.amount !== '0.00' && <div>Advance applied −৳{receipt.advanceApplied?.amount}{receipt.advanceReference ? ` · ${receipt.advanceReference}` : ''}</div>}
+      </div>}
       <p style={{ margin: `${spacing.xs} 0` }}>
         <strong>Total ৳{receipt.totals.total.amount}</strong> · {receipt.payments.map((payment) => `${payment.method} ৳${payment.amount.amount}`).join(', ')}
         {receipt.change.amount === '0.00' ? '' : ` · change ৳${receipt.change.amount}`}

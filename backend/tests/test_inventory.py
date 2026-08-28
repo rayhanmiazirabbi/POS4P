@@ -27,6 +27,52 @@ from tests.conftest import access_token_for
 KEY = "idempotency-receive-key-000001"
 
 
+async def test_intake_adopts_catalogue_stock_atomically_and_replays(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    from app.domains.catalog import CatalogProduct
+
+    catalog = CatalogProduct(
+        name="Napa 500mg", generic_name="Paracetamol", package_unit="tablet",
+        country_code="BD", unit_price=Decimal("2.00"), active=True,
+    )
+    session.add(catalog)
+    await session.commit()
+    body = {
+        "source": "opening_stock",
+        "catalogProductId": str(catalog.id),
+        "shelf": {"salePrice": "2.50", "rack": "A-1"},
+        "quantity": "10",
+    }
+    headers = {**_owner_headers(tenant), "Idempotency-Key": "intake-opening-0000000001"}
+    first = await client.post("/inventory/intakes", json=body, headers=headers)
+    assert first.status_code == 201, first.text
+    second = await client.post("/inventory/intakes", json=body, headers=headers)
+    assert second.status_code == 201, second.text
+    assert second.json()["data"] == first.json()["data"]
+    data = first.json()["data"]
+    assert data["adopted"] is True
+    assert data["batch"]["batchNumber"].startswith("OPENING-")
+    assert data["batch"]["unitCost"] == "0.00"
+    assert data["balance"]["onHand"] == "10.0000"
+
+    shelf = await client.get("/products/current", headers=_owner_headers(tenant))
+    assert shelf.json()["data"]["items"][0]["availableQuantity"] == "10.0000"
+
+
+async def test_supplier_intake_requires_cost(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    store_product = await _make_store_product(session, tenant)
+    await session.commit()
+    response = await client.post(
+        "/inventory/intakes",
+        json={"source": "supplier_receive", "storeProductId": str(store_product.id), "quantity": "5"},
+        headers={**_owner_headers(tenant), "Idempotency-Key": "intake-supplier-00000001"},
+    )
+    assert response.status_code == 422
+
+
 def _context(tenant: dict[str, Any], *, role: Role = Role.OWNER) -> RequestContext:
     return RequestContext(
         organization_id=tenant["organization"].id,
@@ -439,4 +485,3 @@ async def test_foreign_store_product_is_not_found(
         headers={**_owner_headers(tenant)},
     )
     assert response.status_code != 500
-

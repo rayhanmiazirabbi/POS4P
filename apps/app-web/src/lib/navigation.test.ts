@@ -23,7 +23,7 @@ describe('route resolution', () => {
 describe('navigation by role', () => {
   it('gives owner and manager every surface', () => {
     for (const role of ['owner', 'manager'] as const) {
-      expect(hrefs(role)).toEqual(['/pos', '/dashboard', '/catalogue', '/inventory', '/purchasing']);
+      expect(hrefs(role)).toEqual(['/pos', '/dashboard', '/catalogue', '/inventory', '/purchasing', '/settings']);
     }
   });
 
@@ -32,6 +32,7 @@ describe('navigation by role', () => {
     expect(mayVisit('cashier', '/catalogue')).toBe(true);
     expect(mayVisit('cashier', '/purchasing')).toBe(true);
     expect(mayVisit('cashier', '/inventory')).toBe(false);
+    expect(mayVisit('cashier', '/settings')).toBe(false);
   });
 
   it('keeps inventory staff off the counter but on orders and the catalogue', () => {

@@ -97,6 +97,7 @@ describe('toShelfProduct', () => {
       manufacturer: null,
       dosageFormId: null,
       dosageForm: null,
+      unit: 'unit',
     });
   });
 
@@ -138,6 +139,7 @@ describe('createShelfStore', () => {
       {
         id: 'p-PARA-500', sku: 'PARA-500', name: 'Medicine PARA-500', barcode: null, salePrice: '14.00', rack: null,
         genericName: null, strength: null, manufacturerId: null, manufacturer: null, dosageFormId: null, dosageForm: null,
+        unit: 'unit',
       },
     ]);
   });
@@ -160,6 +162,7 @@ describe('createShelfStore', () => {
       {
         id: 'p-1', sku: 'PARA-500', name: 'Paracetamol 500mg', barcode: '8901234567890', salePrice: '12.00', rack: 'A1',
         genericName: null, strength: null, manufacturerId: null, manufacturer: null, dosageFormId: null, dosageForm: null,
+        unit: 'unit',
       },
     ]);
   });

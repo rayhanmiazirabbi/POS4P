@@ -27,6 +27,7 @@ export const POS_ROUTES: readonly PosRoute[] = [
   { href: '/catalogue', label: 'Catalogue', capability: 'catalogue.search' },
   { href: '/inventory', label: 'Inventory', capability: 'inventory.adjust' },
   { href: '/purchasing', label: 'Purchasing', capability: 'purchasing.orders.manage' },
+  { href: '/settings', label: 'Settings', capability: 'store.manage' },
 ];
 
 /** Whether `pathname` is `href` or something nested under it -- segment-aware, so

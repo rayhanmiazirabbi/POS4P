@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy import select
 
 from app.context import RequestContext
 from app.dependencies import ContextDep, RequestIdDep, SessionDep, require_roles
+from app.domains.inventory import InventoryBalance
 from app.models import Role
 from app.schemas.base import Envelope, Page
 from app.schemas.products import (
@@ -88,6 +91,12 @@ async def list_current_store_products(
     """
     store = await load_current_store(session, context)
     rows = await service.list_shelf(session, context, store, include_inactive=includeInactive)
+    balances = {
+        row.store_product_id: Decimal(row.on_hand) - Decimal(row.reserved)
+        for row in await session.scalars(
+            select(InventoryBalance).where(InventoryBalance.store_id == store.id)
+        )
+    }
     # The product's name and barcode are folded in rather than left a join away:
     # this list is what a device caches to sell offline, and a scan it has to ask
     # the server about is a scan that does not work during an outage.
@@ -96,6 +105,7 @@ async def list_current_store_products(
             {
                 **StoreProductResponse.model_validate(shelf_row).model_dump(),
                 "name": product.name,
+                "unit": product.unit,
                 "barcode": product.barcode,
                 "generic_name": catalog.generic_name if catalog is not None else None,
                 "strength": catalog.strength if catalog is not None else None,
@@ -103,6 +113,7 @@ async def list_current_store_products(
                 "dosage_form": dosage.name if dosage is not None else None,
                 "manufacturer_id": catalog.manufacturer_id if catalog is not None else None,
                 "manufacturer": manufacturer.name if manufacturer is not None else None,
+                "available_quantity": balances.get(shelf_row.id, Decimal(0)),
             }
         )
         for shelf_row, product, catalog, manufacturer, dosage in rows

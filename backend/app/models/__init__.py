@@ -37,15 +37,22 @@ from app.domains.purchase_orders import (
 )
 from app.domains.purchasing import Purchase, PurchaseItem
 from app.domains.reports import DailyStoreMetric, StoreExpense
-from app.domains.sales import Sale, SaleItem, SaleItemBatchAllocation, SaleReturn
-from app.domains.suppliers import Supplier, SupplierLedgerEntry, SupplierProduct
+from app.domains.sales import DiscountApproval, Sale, SaleItem, SaleItemBatchAllocation, SaleReturn
 from app.domains.supplier_network import (
     AcknowledgementStatus,
     NetworkInviteStatus,
     PurchaseAcknowledgement,
     SupplierNetworkInvite,
 )
-from app.domains.sync import Device, DeviceStatus, StoreSequence, SyncCheckpoint, SyncEvent, SyncFeedItem
+from app.domains.suppliers import Supplier, SupplierLedgerEntry, SupplierProduct
+from app.domains.sync import (
+    Device,
+    DeviceStatus,
+    StoreSequence,
+    SyncCheckpoint,
+    SyncEvent,
+    SyncFeedItem,
+)
 from app.models.base import Base
 from app.models.cross_cutting import AuditLog, IdempotencyRecord, OutboxEvent
 from app.models.identity import (
@@ -83,6 +90,7 @@ __all__ = [
     "DailyStoreMetric",
     "Device",
     "DeviceStatus",
+    "DiscountApproval",
     "DosageForm",
     "EcommerceProductSetting",
     "IdempotencyRecord",
@@ -124,6 +132,7 @@ __all__ = [
     "StoreExpense",
     "StoreProduct",
     "StoreProductPrice",
+    "StoreSequence",
     "StoreUser",
     "Storefront",
     "SubscriptionStatus",
@@ -131,7 +140,6 @@ __all__ = [
     "SupplierLedgerEntry",
     "SupplierNetworkInvite",
     "SupplierProduct",
-    "StoreSequence",
     "SyncCheckpoint",
     "SyncEvent",
     "SyncFeedItem",

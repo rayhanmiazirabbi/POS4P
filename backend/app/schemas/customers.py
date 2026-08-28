@@ -54,6 +54,7 @@ class CustomerResponse(ApiModel):
     normalized_phone: str | None
     email: str | None
     due_balance: Decimal
+    advance_balance: Decimal = Decimal("0.00")
     preferences: dict
     active: bool
     created_at: datetime

@@ -13,9 +13,9 @@ import { groupMedicineMatches, matchMedicineText, type MedicineManufacturerGroup
  * it -- the whole reason this platform queues sales -- never sees a single one. The
  * cache was in memory, which is to say it was not a cache.
  *
- * Kept deliberately small. It holds what a cart line needs and nothing else: an id
- * to post, a SKU to search and print, and a price. Stock levels are absent on
- * purpose (see `readShelf`).
+ * Kept deliberately small. It holds what a cart line needs, plus the last known
+ * available balance so the POS can distinguish an out-of-stock shelf row from an
+ * unadopted catalogue result. The server remains authoritative at checkout.
  */
 export type ShelfProduct = {
   id: string;
@@ -33,6 +33,8 @@ export type ShelfProduct = {
   manufacturer?: string | null;
   dosageFormId?: string | null;
   dosageForm?: string | null;
+  unit?: string;
+  availableQuantity?: string;
 };
 
 /**
@@ -64,6 +66,7 @@ export type ShelfSource = {
   barcode?: string | null; rack?: string | null; genericName?: string | null;
   strength?: string | null; manufacturerId?: string | null; manufacturer?: string | null;
   dosageFormId?: string | null; dosageForm?: string | null;
+  unit?: string; availableQuantity?: string;
 };
 
 /** Narrowed from the API row, dropping what a cart does not need. */
@@ -81,6 +84,8 @@ export function toShelfProduct(product: ShelfSource): ShelfProduct {
     manufacturer: product.manufacturer ?? null,
     dosageFormId: product.dosageFormId ?? null,
     dosageForm: product.dosageForm ?? null,
+    unit: product.unit ?? 'unit',
+    ...(product.availableQuantity === undefined ? {} : { availableQuantity: product.availableQuantity }),
   };
 }
 
@@ -137,11 +142,10 @@ export type ShelfRead =
  * selling when the line is out the door, and a stale price is a smaller error than
  * a refused sale. The shell shows the age and lets the cashier decide.
  *
- * What is *not* cached is stock. Availability changes with every sale on every
- * other till, so a cached figure is a promise the device cannot keep; the server
- * allocates batches at replay and an offline sale can still come back
- * `INSUFFICIENT_STOCK`. Caching prices lets the counter keep working; caching
- * stock would let it lie.
+ * Availability is a last-known hint, not a reservation. It changes with every
+ * sale on every till, so the server still allocates batches at replay and an
+ * offline sale can come back `INSUFFICIENT_STOCK`. Old cache rows without the
+ * hint remain sellable until the next successful refresh adds it.
  */
 export function readShelf(cache: ShelfCache | null, storeId: string, nowUtcIso: string): ShelfRead {
   if (cache === null) return { status: 'empty' };

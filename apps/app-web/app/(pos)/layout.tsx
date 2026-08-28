@@ -1,17 +1,18 @@
 'use client';
 
-import { colors, spacing, tokens } from '@pharmacy/design-tokens';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 
 import { allowedRoutes, isUnder, landingRoute, mayVisit, routeFor } from '@/lib/navigation';
+import { routeForShortcut } from '@/lib/shortcuts';
 import { useSession } from '@/lib/session';
 
 export default function PosLayout({ children }: { children: ReactNode }): ReactNode {
   const { user, status, signOut } = useSession();
   const router = useRouter();
   const pathname = usePathname();
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   const role = user?.role ?? null;
   const known = routeFor(pathname) !== undefined;
@@ -24,64 +25,75 @@ export default function PosLayout({ children }: { children: ReactNode }): ReactN
   }, [status, router]);
 
   useEffect(() => {
-    // Sign-in always lands on `/pos`, because the role is not known at that point
-    // -- it arrives with `me()`. Inventory staff hold no `sales.create`, so without
-    // this they opened a counter the server refuses every sale from.
     if (status !== 'signed-in' || !known || permitted || landing === null) return;
     router.replace(landing);
   }, [status, known, permitted, landing, router]);
 
-  if (status !== 'signed-in' || user === null) {
-    return <main style={{ padding: spacing['2xl'], fontFamily: tokens.typography.family }}>Loading…</main>;
-  }
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (document.querySelector('[aria-modal="true"]')) return;
+      const route = routeForShortcut(event.key, event.altKey);
+      if (route !== null && mayVisit(role, route)) {
+        event.preventDefault();
+        router.push(route);
+        return;
+      }
+      const editable = event.target instanceof HTMLElement && event.target.matches('input, textarea, select, [contenteditable="true"]');
+      if (event.key === '?' && !event.altKey && !event.ctrlKey && !event.metaKey && !editable) {
+        event.preventDefault();
+        setShortcutsOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [role, router]);
+
+  if (status !== 'signed-in' || user === null) return <main className="route-loading">Loading workspace…</main>;
 
   return (
-    <div style={{ minHeight: '100vh', background: colors.background, color: colors.foreground, fontFamily: tokens.typography.family }}>
-      {/* Wrapping, not shrinking: on a counter's narrow window the links and the
-          signed-in label must flow onto another line, not overflow off-screen. */}
-      <header style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: spacing.xl, rowGap: spacing.sm, padding: `${spacing.md} ${spacing.xl}`, background: colors.surface, borderBottom: `1px solid ${colors.border}` }}>
-        <strong>{user.organizationName}</strong>
-        <nav style={{ display: 'flex', flexWrap: 'wrap', gap: spacing.lg, rowGap: spacing.sm, flex: 1 }}>
+    <div className="app-shell">
+      <header className="app-header">
+        <div className="brand-block"><span className="brand-mark" aria-hidden="true">Rx</span><span className="brand-name">{user.organizationName}</span></div>
+        <nav className="app-nav" aria-label="Primary navigation">
           {allowed.map((route) => <NavLink key={route.href} href={route.href} pathname={pathname}>{route.label}</NavLink>)}
         </nav>
-        <span style={{ color: colors.muted }}>
-          {user.user.displayName} · {user.role}
-          {user.storeName ? ` · ${user.storeName}` : ''}
-        </span>
-        <button type="button" onClick={() => void signOut()} style={{ padding: `${spacing.xs} ${spacing.md}`, borderRadius: 8, border: `1px solid ${colors.border}`, background: 'transparent', cursor: 'pointer' }}>
-          Sign out
-        </button>
+        <div className="account-context">
+          <span className="account-copy"><strong>{user.user.displayName}</strong><small>{user.role.replace('_', ' ')}{user.storeName ? ` · ${user.storeName}` : ''}</small></span>
+          <button type="button" className="header-action" onClick={() => setShortcutsOpen(true)} aria-label="Show keyboard shortcuts">?</button>
+          <button type="button" className="header-action sign-out" onClick={() => void signOut()}>Sign out</button>
+        </div>
       </header>
-      {/* Children are withheld, not merely unlinked. A denied page that mounts runs
-          its own loader first, so typing the URL earned a screenful of 403s on a
-          screen the role should never have reached -- hiding the link was never the
-          guard. Backend enforcement stays mandatory either way; this only stops the
-          client asking questions it has no right to ask. */}
-      {permitted ? children : <Denied role={user.role} landing={landing} />}
+      <div className="app-content">{permitted ? children : <Denied role={user.role} landing={landing} />}</div>
+      {shortcutsOpen && <ShortcutDialog onClose={() => setShortcutsOpen(false)} />}
     </div>
   );
 }
 
-/** Shown while the redirect is in flight, and permanently for a role that holds
- *  nothing: there is nowhere to send them, and bouncing to `/login` would only
- *  sign them straight back in and land here again. */
 function Denied({ role, landing }: { role: string; landing: string | null }): ReactNode {
-  return (
-    <main style={{ padding: spacing['2xl'] }}>
-      <p role="alert" style={{ color: colors.muted, margin: 0 }}>
-        {landing === null
-          ? `Your role (${role}) has no screens assigned. Ask an owner or manager to review your access.`
-          : 'Not available for your role — taking you back…'}
-      </p>
-    </main>
-  );
+  return <main className="page-shell"><p role="alert" className="status-message status-message--muted">{landing === null ? `Your role (${role}) has no screens assigned. Ask an owner or manager to review your access.` : 'Not available for your role — taking you back…'}</p></main>;
 }
 
 function NavLink({ href, pathname, children }: { href: string; pathname: string; children: ReactNode }): ReactNode {
   const active = isUnder(pathname, href);
+  return <Link href={href} className={`nav-link${active ? ' nav-link--active' : ''}`} aria-current={active ? 'page' : undefined}>{children}</Link>;
+}
+
+function ShortcutDialog({ onClose }: { onClose: () => void }): ReactNode {
   return (
-    <Link href={href} style={{ color: active ? colors.primary : colors.muted, textDecoration: 'none', fontWeight: active ? tokens.typography.weights.semibold : tokens.typography.weights.regular }}>
-      {children}
-    </Link>
+    <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="dialog-panel shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title" onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}>
+        <header className="dialog-header"><div><span className="eyebrow">Keyboard operation</span><h2 id="shortcuts-title">Shortcuts</h2></div><button autoFocus type="button" className="icon-action" onClick={onClose} aria-label="Close shortcuts">×</button></header>
+        <div className="shortcut-grid">
+          <kbd>Alt 1–6</kbd><span>Navigate the main workspace</span>
+          <kbd>/</kbd><span>Focus medicine search</span>
+          <kbd>↑ ↓ Enter</kbd><span>Move through and select results</span>
+          <kbd>F4</kbd><span>Hold the current cart</span>
+          <kbd>F8</kbd><span>Focus held carts</span>
+          <kbd>F9 / F10</kbd><span>Focus cash / digital amount</span>
+          <kbd>F12</kbd><span>Complete the sale</span>
+          <kbd>Esc</kbd><span>Close the current panel</span>
+        </div>
+      </section>
+    </div>
   );
 }

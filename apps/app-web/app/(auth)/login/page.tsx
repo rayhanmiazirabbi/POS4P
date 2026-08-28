@@ -192,7 +192,7 @@ export default function LoginPage(): ReactNode {
         {stage === 'code' && (
           <>
             <label style={{ display: 'block', marginBottom: spacing.xs, fontWeight: tokens.typography.weights.medium }} htmlFor="code">Code</label>
-            <input id="code" style={inputStyle} value={code} onChange={(event) => setCode(event.target.value)} inputMode="numeric" autoFocus />
+            <input id="code" style={inputStyle} value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))} inputMode="numeric" autoFocus />
             <button type="submit" disabled={busy || code.length === 0} style={buttonStyle}>{busy ? 'Verifying…' : 'Verify'}</button>
           </>
         )}

@@ -7,9 +7,11 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.context import RequestContext
+from app.domains.catalog import CatalogBarcode, CatalogProduct
 from app.domains.inventory import (
     Allocation,
     BatchStock,
@@ -24,14 +26,18 @@ from app.domains.inventory import (
     allocate_fefo,
     rebuild_balances,
 )
+from app.domains.products import PharmacyProduct
+from app.domains.suppliers import Supplier
 from app.errors import Conflict, DomainError, Forbidden, NotFound, ValidationError
 from app.models import Role, StoreProduct
+from app.schemas.inventory import InventoryIntakeRequest
 from app.security import utc_now
 from app.services.audit import record_audit, redact
+from app.services.idempotency import remember, replay
 from app.services.stores import business_date, load_store
 
 #: Receiving stock is inventory work; only adjustments escalate to OWNER/MANAGER.
-INVENTORY_ROLES = frozenset({Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF})
+INVENTORY_ROLES = frozenset({Role.OWNER, Role.MANAGER, Role.CASHIER, Role.INVENTORY_STAFF})
 ADJUSTMENT_ROLES = frozenset({Role.OWNER, Role.MANAGER})
 
 
@@ -297,6 +303,236 @@ async def receive_batch(
     if commit:
         await session.commit()
     return batch, movement, balance
+
+
+def _intake_sku_seed(name: str) -> str:
+    seed = "".join(character for character in name.upper() if character.isalnum())[:12]
+    return seed or "ITEM"
+
+
+async def _intake_sku(session: AsyncSession, store_id: UUID, name: str) -> str:
+    seed = _intake_sku_seed(name)
+    taken = set(
+        await session.scalars(
+            select(StoreProduct.sku).where(
+                StoreProduct.store_id == store_id,
+                StoreProduct.sku.like(f"{seed}%"),
+            )
+        )
+    )
+    candidate, suffix = seed, 1
+    while candidate in taken:
+        suffix += 1
+        candidate = f"{seed}-{suffix}"
+    return candidate
+
+
+async def intake_inventory(
+    session: AsyncSession,
+    context: RequestContext,
+    payload: InventoryIntakeRequest,
+    *,
+    idempotency_key: str,
+    request_id: str,
+) -> dict[str, Any]:
+    """Adopt/enable/update a product and receive its stock in one transaction."""
+    if context.store_id is None:
+        raise ValidationError("Store context required", code="STORE_CONTEXT_REQUIRED")
+    payload_dict = payload.model_dump(by_alias=True, mode="json")
+    stored = await replay(session, context.organization_id, idempotency_key, payload_dict)
+    if stored is not None:
+        return stored
+
+    store = await load_store(session, context, context.store_id)
+    product: PharmacyProduct | None = None
+    shelf: StoreProduct | None = None
+    adopted = False
+
+    if payload.store_product_id is not None:
+        shelf = await load_store_product(session, context, payload.store_product_id)
+        product = await session.get(PharmacyProduct, shelf.pharmacy_product_id)
+    elif payload.pharmacy_product_id is not None:
+        product = await session.get(PharmacyProduct, payload.pharmacy_product_id)
+        if product is None or product.organization_id != context.organization_id:
+            raise NotFound("Product not found")
+    elif payload.catalog_product_id is not None:
+        catalog = await session.get(CatalogProduct, payload.catalog_product_id)
+        if catalog is None or not catalog.active:
+            raise NotFound("Catalog product not found")
+        product = await session.scalar(
+            select(PharmacyProduct).where(
+                PharmacyProduct.organization_id == context.organization_id,
+                PharmacyProduct.catalog_product_id == catalog.id,
+            )
+        )
+        if product is None:
+            barcode = await session.scalar(
+                select(CatalogBarcode.barcode)
+                .where(CatalogBarcode.catalog_product_id == catalog.id)
+                .order_by(CatalogBarcode.barcode)
+            )
+            if barcode is not None and await session.scalar(
+                select(PharmacyProduct.id).where(
+                    PharmacyProduct.organization_id == context.organization_id,
+                    PharmacyProduct.barcode == barcode,
+                    PharmacyProduct.active.is_(True),
+                )
+            ) is not None:
+                barcode = None
+            product = PharmacyProduct(
+                organization_id=context.organization_id,
+                catalog_product_id=catalog.id,
+                name=catalog.name,
+                barcode=barcode,
+                unit=catalog.package_unit,
+                active=True,
+            )
+            session.add(product)
+            await session.flush()
+            adopted = True
+        else:
+            product.active = True
+    else:
+        assert payload.custom_product is not None
+        if payload.custom_product.barcode is not None and await session.scalar(
+            select(PharmacyProduct.id).where(
+                PharmacyProduct.organization_id == context.organization_id,
+                PharmacyProduct.barcode == payload.custom_product.barcode,
+                PharmacyProduct.active.is_(True),
+            )
+        ) is not None:
+            raise Conflict(f"Barcode '{payload.custom_product.barcode}' already exists in this organization")
+        product = PharmacyProduct(
+            organization_id=context.organization_id,
+            name=payload.custom_product.name.strip(),
+            unit=payload.custom_product.unit.strip(),
+            barcode=payload.custom_product.barcode,
+            active=True,
+        )
+        session.add(product)
+        await session.flush()
+        adopted = True
+
+    assert product is not None
+    if shelf is None:
+        shelf = await session.scalar(
+            select(StoreProduct).where(
+                StoreProduct.store_id == store.id,
+                StoreProduct.pharmacy_product_id == product.id,
+            )
+        )
+    if shelf is None:
+        assert payload.shelf.sale_price is not None
+        shelf = StoreProduct(
+            organization_id=context.organization_id,
+            store_id=store.id,
+            pharmacy_product_id=product.id,
+            sku=payload.shelf.sku or await _intake_sku(session, store.id, product.name),
+            sale_price=payload.shelf.sale_price,
+            minimum_stock=payload.shelf.minimum_stock or Decimal(0),
+            rack=payload.shelf.rack,
+            active=True,
+        )
+        session.add(shelf)
+        await session.flush()
+        adopted = True
+    else:
+        shelf.active = True
+        if payload.shelf.sku is not None:
+            duplicate_sku = await session.scalar(
+                select(StoreProduct.id).where(
+                    StoreProduct.store_id == store.id,
+                    StoreProduct.sku == payload.shelf.sku,
+                    StoreProduct.id != shelf.id,
+                )
+            )
+            if duplicate_sku is not None:
+                raise Conflict(f"SKU '{payload.shelf.sku}' already exists in this store")
+            shelf.sku = payload.shelf.sku
+        if payload.shelf.sale_price is not None:
+            shelf.sale_price = payload.shelf.sale_price
+        if payload.shelf.minimum_stock is not None:
+            shelf.minimum_stock = payload.shelf.minimum_stock
+        if payload.shelf.rack is not None:
+            shelf.rack = payload.shelf.rack
+
+    if payload.shelf.barcode is not None:
+        duplicate_barcode = await session.scalar(
+            select(PharmacyProduct.id).where(
+                PharmacyProduct.organization_id == context.organization_id,
+                PharmacyProduct.barcode == payload.shelf.barcode,
+                PharmacyProduct.id != product.id,
+                PharmacyProduct.active.is_(True),
+            )
+        )
+        if duplicate_barcode is not None:
+            raise Conflict(f"Barcode '{payload.shelf.barcode}' already exists in this organization")
+        product.barcode = payload.shelf.barcode
+    product.active = True
+
+    if payload.supplier_id is not None:
+        supplier = await session.get(Supplier, payload.supplier_id)
+        if supplier is None or supplier.organization_id != context.organization_id:
+            raise NotFound("Supplier not found")
+
+    prefix = "OPENING" if payload.source == "opening_stock" else "RECEIPT"
+    batch_number = payload.batch_number or f"{prefix}-{utc_now():%Y%m%d}-{idempotency_key[-6:].upper()}"
+    batch, movement, balance = await receive_batch(
+        session,
+        context,
+        shelf.id,
+        batch_number=batch_number,
+        expiry_date=payload.expiry_date,
+        unit_cost=payload.unit_cost if payload.unit_cost is not None else Decimal("0.00"),
+        quantity=payload.quantity,
+        reference_type=payload.source,
+        idempotency_key=idempotency_key,
+        request_id=request_id,
+        commit=False,
+    )
+    record_audit(
+        session,
+        context,
+        action="inventory.intake",
+        entity_type="store_product",
+        entity_id=shelf.id,
+        request_id=request_id,
+        after=redact({"source": payload.source, "adopted": adopted, "reference": payload.reference}),
+    )
+    response = {
+        "storeProductId": str(shelf.id),
+        "pharmacyProductId": str(product.id),
+        "name": product.name,
+        "sku": shelf.sku,
+        "barcode": product.barcode,
+        "salePrice": str(shelf.sale_price),
+        "rack": shelf.rack,
+        "unit": product.unit,
+        "adopted": adopted,
+        "batch": {
+            "id": str(batch.id), "batchNumber": batch.batch_number,
+            "expiryDate": batch.expiry_date.isoformat() if batch.expiry_date else None,
+            "unitCost": str(Decimal(batch.unit_cost).quantize(Decimal("0.01"))), "receivedAt": batch.received_at.isoformat(),
+        },
+        "movement": {
+            "id": str(movement.id), "storeProductId": str(movement.store_product_id),
+            "batchId": str(movement.batch_id) if movement.batch_id else None,
+            "movementType": movement.movement_type.value, "quantity": str(movement.quantity),
+            "occurredAt": movement.occurred_at.isoformat(),
+        },
+        "balance": {
+            "storeProductId": str(balance.store_product_id), "onHand": str(Decimal(balance.on_hand).quantize(Decimal("0.0001"))),
+            "reserved": str(Decimal(balance.reserved).quantize(Decimal("0.0001"))),
+            "available": str((Decimal(balance.on_hand) - Decimal(balance.reserved)).quantize(Decimal("0.0001"))),
+        },
+    }
+    remember(session, context.organization_id, idempotency_key, payload_dict, response_status=201, response_body=response)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise Conflict("Intake conflicts with an existing barcode or SKU") from exc
+    return response
 
 
 # --- FEFO allocation + consumption ------------------------------------------

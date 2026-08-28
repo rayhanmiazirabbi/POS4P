@@ -16,6 +16,7 @@ import { z } from 'zod';
 
 import { pharmacyApi } from '@/lib/api';
 import { CATALOGUE_PAGE_SIZE, hasMoreResults, nextResultWindow, toRanked } from '@/lib/catalogueRows';
+import { decimalEntry } from '@/lib/numeric-input';
 import { useSession } from '@/lib/session';
 import { decimalAmount, fieldIssue, positiveQuantity } from '@/lib/validation';
 
@@ -340,7 +341,7 @@ export default function CataloguePage(): ReactNode {
         {expanded && panelAction === 'shelf' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, marginTop: spacing.sm }}>
             <input style={input} placeholder="SKU" value={sku} onChange={(event) => setSku(event.target.value)} />
-            <input style={input} placeholder="Sale price, e.g. 10.00" value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" />
+            <input style={input} placeholder="Sale price, e.g. 10.00" value={price} onChange={(event) => setPrice(decimalEntry(event.target.value))} inputMode="decimal" />
             <div style={{ display: 'flex', gap: spacing.xs }}>
               <button type="button" style={button} disabled={busy} onClick={() => void (row.shopStatus === 'in_org' ? backOnShelf(row) : adopt(row))}>
                 {row.shopStatus === 'in_org' ? 'Enable' : 'Adopt'}
@@ -364,7 +365,7 @@ export default function CataloguePage(): ReactNode {
                 </option>
               ))}
             </select>
-            <input style={input} placeholder={`Quantity of ${row.name}`} value={quantity} onChange={(event) => setQuantity(event.target.value)} inputMode="decimal" />
+            <input style={input} placeholder={`Quantity of ${row.name}`} value={quantity} onChange={(event) => setQuantity(decimalEntry(event.target.value))} inputMode="decimal" />
             <div style={{ display: 'flex', gap: spacing.xs }}>
               <button type="button" style={button} disabled={busy} onClick={() => void addToPurchaseOrder(row)}>Add to order</button>
               <button type="button" style={quietButton} onClick={() => setExpandedId(null)}>Cancel</button>
@@ -418,9 +419,10 @@ export default function CataloguePage(): ReactNode {
   }
 
   return (
-    <main className="split-grid split-grid--wide">
-      <section style={{ ...card, gridColumn: '1 / -1' }}>
-        <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Find a medicine</h2>
+    <main className="split-grid split-grid--wide catalogue-page">
+      <section className="surface catalogue-search" style={{ ...card, gridColumn: '1 / -1' }}>
+        <span className="eyebrow">Shared medicine catalogue</span>
+        <h1 style={{ margin: `${spacing.xs} 0 ${spacing.md}`, fontSize: tokens.typography.sizes.xl }}>Find a medicine</h1>
         <div style={{ display: 'flex', gap: spacing.xs, alignItems: 'center' }}>
           <input
             ref={searchRef}
@@ -470,7 +472,7 @@ export default function CataloguePage(): ReactNode {
         )}
       </section>
 
-      <section style={card}>
+      <section className="surface catalogue-results" style={card}>
         <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>
           Results{rows.length > 0 ? ` (${rows.length})` : ''}
         </h2>
@@ -500,7 +502,7 @@ export default function CataloguePage(): ReactNode {
         )}
       </section>
 
-      <section style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
+      <section className="surface catalogue-create" style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
         <h2 style={{ margin: 0, fontSize: tokens.typography.sizes.lg }}>Add a missing medicine</h2>
         {mayAdopt ? (
           <p style={{ margin: 0, color: colors.muted }}>
@@ -517,7 +519,7 @@ export default function CataloguePage(): ReactNode {
           <label style={{ display: 'flex', alignItems: 'center', gap: spacing.xs }}>
             <input type="checkbox" checked={entryRx} onChange={(event) => setEntryRx(event.target.checked)} disabled={!mayAdopt} /> Prescription required
           </label>
-          <input style={input} placeholder="Sale price, e.g. 10.00" value={entryPrice} onChange={(event) => setEntryPrice(event.target.value)} inputMode="decimal" disabled={!mayAdopt} />
+          <input style={input} placeholder="Sale price, e.g. 10.00" value={entryPrice} onChange={(event) => setEntryPrice(decimalEntry(event.target.value))} inputMode="decimal" disabled={!mayAdopt} />
         </div>
         <button type="button" style={button} disabled={!mayAdopt || busy} onClick={() => void createEntryAndAdopt()}>Create and adopt</button>
 
@@ -736,7 +738,7 @@ function LegacyForms({ onDone, onError }: { onDone: () => Promise<void>; onError
             {products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}
           </select>
           <input style={input} placeholder="SKU" value={sku} onChange={(event) => setSku(event.target.value)} />
-          <input style={input} placeholder="Sale price" value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" />
+          <input style={input} placeholder="Sale price" value={price} onChange={(event) => setPrice(decimalEntry(event.target.value))} inputMode="decimal" />
           <button type="button" style={button} disabled={!shelfForm.success || selected === ''} onClick={() => void enableOnShelf()}>Enable</button>
         </div>
       </details>

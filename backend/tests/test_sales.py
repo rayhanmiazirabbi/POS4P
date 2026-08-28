@@ -21,6 +21,127 @@ from tests.conftest import access_token_for
 SALE_KEY = "sale-key-000000000000001"
 
 
+async def test_structured_adjustments_require_bound_pin_and_apply_in_order(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    from app.domains.customers import Customer
+    from app.security import hash_secret
+
+    tenant["owner"].pin_hash = hash_secret("2468")
+    tenant["organization"].settings = {"require_pin_for_discounts": True}
+    customer = Customer(
+        organization_id=tenant["organization"].id,
+        name="Advance Customer", due_balance=Decimal(0), advance_balance=Decimal(0),
+        preferences={}, active=True,
+    )
+    session.add(customer)
+    sp = await _make_store_product(session, tenant, price="10.00")
+    await _receive(session, tenant, sp.id, quantity="20")
+    items = [{
+        "storeProductId": str(sp.id), "quantity": "10",
+        "discount": {"mode": "percentage", "value": "10"},
+    }]
+    global_discount = {"mode": "percentage", "value": "10"}
+    charges = [
+        {"kind": "delivery", "amount": "5.00"},
+        {"kind": "other", "amount": "2.00", "label": "Bag"},
+    ]
+    denied = await client.post(
+        "/sales",
+        json={"items": items, "globalDiscount": global_discount, "charges": charges, "payments": [{"method": "cash", "amount": "88.00", "receivedAmount": "88.00"}]},
+        headers={**_headers(tenant), "Idempotency-Key": "structured-sale-denied-01"},
+    )
+    assert denied.status_code == 403
+    approval = await client.post(
+        "/sales/discount-approvals",
+        json={"phone": tenant["owner"].phone, "pin": "2468", "items": items, "globalDiscount": global_discount, "charges": charges},
+        headers=_headers(tenant),
+    )
+    assert approval.status_code == 201, approval.text
+    response = await client.post(
+        "/sales",
+        json={
+            "customerId": str(customer.id), "items": items, "globalDiscount": global_discount,
+            "charges": charges, "advanceApplication": {"amount": "20.00", "reference": "ADV-1"},
+            "discountApprovalToken": approval.json()["data"]["token"],
+            "payments": [{"method": "cash", "amount": "68.00", "receivedAmount": "68.00"}],
+        },
+        headers={**_headers(tenant), "Idempotency-Key": "structured-sale-00000001"},
+    )
+    assert response.status_code == 201, response.text
+    data = response.json()["data"]
+    assert data["subtotal"] == "100.00"
+    assert data["lineDiscount"] == "10.00"
+    assert data["globalDiscount"] == "9.00"
+    assert data["deliveryCharge"] == "5.00"
+    assert data["otherFee"] == "2.00"
+    assert data["total"] == "88.00"
+    assert data["advanceApplied"] == "20.00"
+    assert data["amountDueNow"] == "68.00"
+    assert data["items"][0]["discountAmount"] == "10.00"
+
+
+async def test_discount_approval_rejects_a_changed_cart(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    from app.security import hash_secret
+
+    tenant["owner"].pin_hash = hash_secret("2468")
+    tenant["organization"].settings = {"require_pin_for_discounts": True}
+    sp = await _make_store_product(session, tenant)
+    await _receive(session, tenant, sp.id, quantity="10")
+    approved_items = [{"storeProductId": str(sp.id), "quantity": "2", "discount": {"mode": "flat", "value": "1.00"}}]
+    approval = await client.post(
+        "/sales/discount-approvals",
+        json={"phone": tenant["owner"].phone, "pin": "2468", "items": approved_items},
+        headers=_headers(tenant),
+    )
+    token = approval.json()["data"]["token"]
+    changed = [{"storeProductId": str(sp.id), "quantity": "2", "discount": {"mode": "flat", "value": "2.00"}}]
+    response = await client.post(
+        "/sales",
+        json={"items": changed, "discountApprovalToken": token, "payments": [{"method": "cash", "amount": "18.00", "receivedAmount": "18.00"}]},
+        headers={**_headers(tenant), "Idempotency-Key": "changed-cart-sale-00001"},
+    )
+    assert response.status_code == 403
+
+
+async def test_legacy_discount_cannot_bypass_required_pin(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    from app.security import hash_secret
+
+    tenant["owner"].pin_hash = hash_secret("2468")
+    tenant["organization"].settings = {"require_pin_for_discounts": True}
+    sp = await _make_store_product(session, tenant)
+    await _receive(session, tenant, sp.id, quantity="10")
+    items = [{"storeProductId": str(sp.id), "quantity": "2"}]
+    body = {
+        "items": items,
+        "discount": "1.00",
+        "payments": [{"method": "cash", "amount": "19.00", "receivedAmount": "19.00"}],
+    }
+    denied = await client.post(
+        "/sales",
+        json=body,
+        headers={**_headers(tenant), "Idempotency-Key": "legacy-pin-denied-00001"},
+    )
+    assert denied.status_code == 403
+
+    approval = await client.post(
+        "/sales/discount-approvals",
+        json={"phone": tenant["owner"].phone, "pin": "2468", "items": items, "discount": "1.00"},
+        headers=_headers(tenant),
+    )
+    assert approval.status_code == 201, approval.text
+    accepted = await client.post(
+        "/sales",
+        json={**body, "discountApprovalToken": approval.json()["data"]["token"]},
+        headers={**_headers(tenant), "Idempotency-Key": "legacy-pin-approved-0001"},
+    )
+    assert accepted.status_code == 201, accepted.text
+
+
 def _headers(tenant: dict[str, Any], *, role: Role = Role.OWNER) -> dict[str, str]:
     token = access_token_for(
         session_id=tenant["session"].id,
@@ -558,6 +679,8 @@ async def test_a_return_refunds_what_the_discounted_sale_actually_took(
     paid 20.00 to accept the return, and ``refund_payments`` capping each tender
     was the only thing keeping the loss down to the amount tendered.
     """
+    tenant["organization"].settings = {"require_pin_for_discounts": False}
+    await session.commit()
     sp = await _make_store_product(session, tenant)
     await _receive(session, tenant, sp.id, quantity="10")
     data = await _create_sale(
@@ -594,6 +717,8 @@ async def test_partial_returns_of_an_uneven_discount_add_up_exactly(
     between the value of everything returned so far and the value of everything
     returned before it, so the three add up to exactly 20.00.
     """
+    tenant["organization"].settings = {"require_pin_for_discounts": False}
+    await session.commit()
     sp = await _make_store_product(session, tenant)
     await _receive(session, tenant, sp.id, quantity="10")
     data = await _create_sale(

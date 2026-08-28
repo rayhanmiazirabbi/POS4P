@@ -13,8 +13,11 @@ from app.dependencies import (
 )
 from app.domains.sales import SaleStatus
 from app.models import Role
+from app.routers.purchasing import require_idempotency_key
 from app.schemas.base import Envelope, Page
 from app.schemas.sales import (
+    DiscountApprovalRequest,
+    DiscountApprovalResponse,
     SaleCreateRequest,
     SaleResponse,
     SaleReturnRequest,
@@ -22,7 +25,6 @@ from app.schemas.sales import (
     SaleVoidRequest,
 )
 from app.services import sales as service
-from app.routers.purchasing import require_idempotency_key
 
 router = APIRouter(prefix="/sales", tags=["Sales"])
 
@@ -35,6 +37,29 @@ IdempotentDep = Annotated[str, Depends(require_idempotency_key)]
 
 def _response(sale, items, payments) -> SaleResponse:
     return SaleResponse.model_validate(service.sale_body(sale, items, payments))
+
+
+@router.post(
+    "/discount-approvals",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Envelope[DiscountApprovalResponse],
+    summary="Approve the current cart discount with an owner or manager PIN",
+)
+async def approve_discount(
+    payload: DiscountApprovalRequest,
+    session: SessionDep,
+    context: StaffRolesDep,
+    request_id: RequestIdDep,
+) -> Envelope[DiscountApprovalResponse]:
+    token, approval, approver = await service.approve_discount(session, context, payload)
+    return Envelope(
+        data=DiscountApprovalResponse(
+            token=token,
+            expires_at=approval.expires_at,
+            approved_by=approver.display_name,
+        ),
+        request_id=request_id,
+    )
 
 
 @router.get(

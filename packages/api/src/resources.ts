@@ -400,6 +400,7 @@ export type StoreProduct = {
  */
 export type ShelfItem = StoreProduct & {
   name: string;
+  unit: string;
   barcode?: string | null;
   genericName?: string | null;
   strength?: string | null;
@@ -407,6 +408,7 @@ export type ShelfItem = StoreProduct & {
   manufacturer?: string | null;
   dosageFormId?: string | null;
   dosageForm?: string | null;
+  availableQuantity: string;
 };
 
 export type SaleStatus = 'completed' | 'voided' | 'refunded';
@@ -436,8 +438,16 @@ export type SaleItem = {
   productName: string;
   quantity: string;
   unitPrice: string;
+  discountMode?: DiscountMode | null;
+  discountValue: string;
+  discountAmount: string;
   lineTotal: string;
 };
+
+export type DiscountMode = 'percentage' | 'flat';
+export type DiscountInput = { mode: DiscountMode; value: string };
+export type SaleChargeInput = { kind: 'delivery' | 'other'; amount: string; label?: string };
+export type AdvanceApplicationInput = { amount: string; reference?: string };
 
 export type Sale = {
   id: string;
@@ -448,6 +458,14 @@ export type Sale = {
   status: SaleStatus;
   subtotal: string;
   discount: string;
+  lineDiscount: string;
+  globalDiscount: string;
+  deliveryCharge: string;
+  otherFeeLabel?: string | null;
+  otherFee: string;
+  advanceApplied: string;
+  advanceReference?: string | null;
+  amountDueNow: string;
   total: string;
   receiptNumber?: string | null;
   voidReason?: string | null;
@@ -466,12 +484,26 @@ export type SalePaymentInput = {
 export type SaleCreateRequest = {
   customerId?: string | null;
   discount?: string;
-  items: readonly { storeProductId: string; quantity: string }[];
+  globalDiscount?: DiscountInput;
+  charges?: readonly SaleChargeInput[];
+  advanceApplication?: AdvanceApplicationInput;
+  discountApprovalToken?: string;
+  items: readonly { storeProductId: string; quantity: string; discount?: DiscountInput }[];
   payments: readonly SalePaymentInput[];
   /** Client display echo only; the server always recomputes from shelf prices. */
   subtotal?: string;
   total?: string;
 };
+
+export type DiscountApprovalRequest = {
+  phone: string;
+  pin: string;
+  items: SaleCreateRequest['items'];
+  discount?: string;
+  globalDiscount?: DiscountInput;
+  charges?: readonly SaleChargeInput[];
+};
+export type DiscountApproval = { token: string; expiresAt: string; approvedBy: string };
 
 export type SaleReturnRequest = { reason: string; lines: readonly { saleItemId: string; quantity: string }[] };
 
@@ -482,6 +514,7 @@ export type SalesClient = {
   read(saleId: string, options?: RequestOptions): Promise<ApiResponse<Sale>>;
   /** Requires an idempotency key (send one via `options.idempotencyKey`). */
   create(body: SaleCreateRequest, options?: RequestOptions): Promise<ApiResponse<Sale>>;
+  approveDiscount(body: DiscountApprovalRequest, options?: RequestOptions): Promise<ApiResponse<DiscountApproval>>;
   /** Requires an idempotency key (send one via `options.idempotencyKey`). */
   createReturn(saleId: string, body: SaleReturnRequest, options?: RequestOptions): Promise<ApiResponse<{ id: string; saleId: string; reason: string; total: string; createdAt: string }>>;
   void(saleId: string, body: { reason: string }, options?: RequestOptions): Promise<ApiResponse<Sale>>;
@@ -496,6 +529,7 @@ export function createSalesClient(client: ApiClient): SalesClient {
       }),
     read: (saleId, options = {}) => client.get<Sale>(`/sales/${segment(saleId)}`, options),
     create: (body, options = {}) => client.post<Sale>('/sales', body, options),
+    approveDiscount: (body, options = {}) => client.post<DiscountApproval>('/sales/discount-approvals', body, options),
     createReturn: (saleId, body, options = {}) =>
       client.post<{ id: string; saleId: string; reason: string; total: string; createdAt: string }>(
         `/sales/${segment(saleId)}/returns`,
@@ -544,6 +578,7 @@ export type Customer = {
   normalizedPhone?: string | null;
   email?: string | null;
   dueBalance: string;
+  advanceBalance: string;
   preferences: Record<string, unknown>;
   active: boolean;
   createdAt: string;
@@ -749,6 +784,34 @@ export type StoreProductEnableRequest = { pharmacyProductId: string; sku: string
 export type StockRow = { storeProductId: string; onHand: string; reserved: string; available: string; lowStock: boolean };
 export type ExpiringBatch = { batchId: string; storeProductId: string; batchNumber: string; expiryDate?: string | null; available: string; daysUntilExpiry: number; expired: boolean };
 export type ReceiveBatchRequest = { storeProductId: string; batchNumber: string; expiryDate?: string; unitCost: string; quantity: string };
+export type InventoryIntakeRequest = {
+  source: 'opening_stock' | 'supplier_receive';
+  storeProductId?: string;
+  pharmacyProductId?: string;
+  catalogProductId?: string;
+  customProduct?: { name: string; unit: string; barcode?: string };
+  shelf?: { salePrice?: string; sku?: string; barcode?: string; rack?: string; minimumStock?: string };
+  quantity: string;
+  unitCost?: string;
+  batchNumber?: string;
+  expiryDate?: string;
+  supplierId?: string;
+  reference?: string;
+};
+export type InventoryIntake = {
+  storeProductId: string;
+  pharmacyProductId: string;
+  name: string;
+  sku: string;
+  barcode?: string | null;
+  salePrice: string;
+  rack?: string | null;
+  unit: string;
+  adopted: boolean;
+  batch: { id: string; batchNumber: string; expiryDate?: string | null; unitCost: string; receivedAt: string };
+  movement: { id: string; storeProductId: string; batchId?: string | null; movementType: string; quantity: string; occurredAt: string };
+  balance: { storeProductId: string; onHand: string; reserved: string; available: string };
+};
 
 export type ProductsClient = {
   listPharmacyProducts(pagination?: Pagination, options?: RequestOptions): Promise<Page<PharmacyProduct>>;
@@ -1005,6 +1068,7 @@ export type InventoryClient = {
   expiring(storeId: string, withinDays?: number, options?: RequestOptions): Promise<ApiResponse<readonly ExpiringBatch[]>>;
   /** Requires an idempotency key (send one via `options.idempotencyKey`). */
   receiveBatch(body: ReceiveBatchRequest, options?: RequestOptions): Promise<ApiResponse<unknown>>;
+  intake(body: InventoryIntakeRequest, options?: RequestOptions): Promise<ApiResponse<InventoryIntake>>;
 };
 
 export function createInventoryClient(client: ApiClient): InventoryClient {
@@ -1015,6 +1079,7 @@ export function createInventoryClient(client: ApiClient): InventoryClient {
     // `/inventory/receive`, not `/inventory/batches`: the latter has never existed,
     // so every receive from the web app was a 404.
     receiveBatch: (body, options = {}) => client.post<unknown>('/inventory/receive', body, options),
+    intake: (body, options = {}) => client.post<InventoryIntake>('/inventory/intakes', body, options),
   };
 }
 

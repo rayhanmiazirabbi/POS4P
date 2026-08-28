@@ -8,7 +8,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { pharmacyApi } from '@/lib/api';
 import { useSession } from '@/lib/session';
 
-const card: CSSProperties = { background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: 12, padding: spacing.lg };
+const card: CSSProperties = { background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: 14, padding: spacing.xl };
 
 /** The API sends money as a decimal string; render it through the shared formatter
  *  so grouping and the currency sign match every other surface. */
@@ -47,16 +47,17 @@ export default function DashboardPage(): ReactNode {
   });
 
   return (
-    <main style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: spacing.lg, padding: spacing.lg }}>
-      <section style={card}>
-        <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Today</h2>
+    <main className="page-shell dashboard-page">
+      <header className="page-heading"><div><span className="eyebrow">Live branch view</span><h1>Dashboard</h1><p>Sales, stock pressure, and recent counter activity.</p></div></header>
+      <section className="surface dashboard-today" style={card}>
+        <h2>Today</h2>
         {metrics.isPending ? (
           <p style={{ color: colors.muted }}>Loading…</p>
         ) : metrics.isError ? (
           <p role="alert" style={{ margin: 0, color: colors.danger }}>{queryMessage(metrics.error)}</p>
         ) : (
           <>
-            <p style={{ fontSize: tokens.typography.sizes.xl, margin: `0 0 ${spacing.sm}` }}>{taka(metrics.data.netSalesTotal)}</p>
+            <p className="dashboard-total">{taka(metrics.data.netSalesTotal)}</p>
             <p style={{ color: colors.muted, margin: 0 }}>
               {metrics.data.transactionCount} transactions · {metrics.data.businessDate}
             </p>
@@ -89,7 +90,8 @@ export default function DashboardPage(): ReactNode {
         )}
       </section>
 
-      <section style={card}>
+      <div className="dashboard-operations">
+      <section className="operation-column">
         <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Low stock ({lowStock.data?.length ?? 0})</h2>
         {lowStock.isError ? (
           <p role="alert" style={{ margin: 0, color: colors.danger }}>{queryMessage(lowStock.error)}</p>
@@ -107,7 +109,7 @@ export default function DashboardPage(): ReactNode {
         )}
       </section>
 
-      <section style={card}>
+      <section className="operation-column">
         <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Expiring ≤ 30 days ({expiry.data?.length ?? 0})</h2>
         {expiry.isError ? (
           <p role="alert" style={{ margin: 0, color: colors.danger }}>{queryMessage(expiry.error)}</p>
@@ -125,7 +127,7 @@ export default function DashboardPage(): ReactNode {
         )}
       </section>
 
-      <section style={card}>
+      <section className="operation-column">
         <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Recent sales</h2>
         {recentSales.isError ? (
           <p role="alert" style={{ margin: 0, color: colors.danger }}>{queryMessage(recentSales.error)}</p>
@@ -152,6 +154,7 @@ export default function DashboardPage(): ReactNode {
           </>
         )}
       </section>
+      </div>
     </main>
   );
 }

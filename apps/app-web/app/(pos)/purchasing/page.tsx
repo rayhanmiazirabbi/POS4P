@@ -9,6 +9,7 @@ import { z } from 'zod';
 
 import { pharmacyApi } from '@/lib/api';
 import { useSession } from '@/lib/session';
+import { decimalEntry } from '@/lib/numeric-input';
 import { decimalAmount, fieldIssue, positiveQuantity } from '@/lib/validation';
 
 const card: CSSProperties = { background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: 12, padding: spacing.lg };
@@ -54,7 +55,7 @@ export default function PurchasingPage(): ReactNode {
   const mayManagePurchases = role !== null && can(role, 'purchases.manage');
 
   return (
-    <main className="split-grid split-grid--wide">
+    <main className="split-grid split-grid--wide purchasing-page">
       <PurchaseOrdersSection mayManagePurchases={mayManagePurchases} />
       {mayManagePurchases ? <PurchasesSection /> : null}
     </main>
@@ -172,7 +173,7 @@ function PurchaseOrdersSection({ mayManagePurchases }: { mayManagePurchases: boo
   const selected = selectedId === '' ? null : detail.data ?? null;
 
   return (
-    <section style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
+    <section className="surface purchasing-orders" style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
       <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Purchase Orders</h2>
 
       {(error !== null || note !== null || ordersQuery.isError) && (
@@ -253,8 +254,8 @@ function PurchaseOrdersSection({ mayManagePurchases }: { mayManagePurchases: boo
             <>
               <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: spacing.xs }}>
                 <input style={input} placeholder="What to order (free text)" value={newLineName} onChange={(event) => setNewLineName(event.target.value)} />
-                <input style={input} placeholder="Qty" value={newLineQty} onChange={(event) => setNewLineQty(event.target.value)} inputMode="decimal" />
-                <input style={input} placeholder="Est. cost" value={newLineCost} onChange={(event) => setNewLineCost(event.target.value)} inputMode="decimal" />
+                <input style={input} placeholder="Qty" value={newLineQty} onChange={(event) => setNewLineQty(decimalEntry(event.target.value))} inputMode="decimal" />
+                <input style={input} placeholder="Est. cost" value={newLineCost} onChange={(event) => setNewLineCost(decimalEntry(event.target.value))} inputMode="decimal" />
               </div>
               <button type="button" style={quietButton} disabled={busy} onClick={() => void addLine(selected.id)}>Add line</button>
             </>
@@ -383,7 +384,7 @@ function PurchasesSection(): ReactNode {
   }
 
   return (
-    <section style={card}>
+    <section className="surface purchasing-purchases" style={card}>
       <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Purchases ({purchases.length})</h2>
       {purchasesQuery.isError && (
         <p role="alert" style={{ margin: 0, color: colors.danger }}>{purchasesQuery.error instanceof Error ? purchasesQuery.error.message : 'Could not load purchases'}</p>
@@ -429,11 +430,11 @@ function PurchasesSection(): ReactNode {
             </select>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.xs }}>
               <div>
-                <input style={{ ...input, width: '100%', boxSizing: 'border-box' }} placeholder="Qty" value={line.quantity} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, quantity: event.target.value } : entry)))} inputMode="decimal" />
+                <input style={{ ...input, width: '100%', boxSizing: 'border-box' }} placeholder="Qty" value={line.quantity} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, quantity: decimalEntry(event.target.value) } : entry)))} inputMode="decimal" />
                 {problems.quantity !== null && <p role="alert" style={{ margin: `${spacing.xs} 0 0`, color: colors.danger, fontSize: tokens.typography.sizes.sm }}>{problems.quantity}</p>}
               </div>
               <div>
-                <input style={{ ...input, width: '100%', boxSizing: 'border-box' }} placeholder="Unit cost" value={line.unitCost} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, unitCost: event.target.value } : entry)))} inputMode="decimal" />
+                <input style={{ ...input, width: '100%', boxSizing: 'border-box' }} placeholder="Unit cost" value={line.unitCost} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, unitCost: decimalEntry(event.target.value) } : entry)))} inputMode="decimal" />
                 {problems.unitCost !== null && <p role="alert" style={{ margin: `${spacing.xs} 0 0`, color: colors.danger, fontSize: tokens.typography.sizes.sm }}>{problems.unitCost}</p>}
               </div>
               <input style={input} placeholder="Batch no." value={line.batchNumber} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, batchNumber: event.target.value } : entry)))} />

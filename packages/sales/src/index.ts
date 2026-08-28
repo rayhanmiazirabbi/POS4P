@@ -270,6 +270,11 @@ export type Receipt = {
   lines: readonly ReceiptLine[];
   totals: SaleTotals;
   payments: readonly Payment[];
+  deliveryCharge?: MoneyValue;
+  otherFeeLabel?: string | null;
+  otherFee?: MoneyValue;
+  advanceApplied?: MoneyValue;
+  advanceReference?: string | null;
   /** Cash handed back across the cash tenders. */
   change: MoneyValue;
 };
@@ -291,6 +296,11 @@ export type FiledSale = {
   subtotal: string;
   discount: string;
   total: string;
+  deliveryCharge?: string;
+  otherFeeLabel?: string | null;
+  otherFee?: string;
+  advanceApplied?: string;
+  advanceReference?: string | null;
   items: readonly { productName: string; quantity: string; unitPrice: string; lineTotal: string }[];
   payments: readonly { method: PaymentMethod; amount: string; receivedAmount?: string | null }[];
 };
@@ -330,7 +340,8 @@ export function receiptFromSale(sale: FiledSale, header: ReceiptHeader): Receipt
     ...(payment.receivedAmount === undefined || payment.receivedAmount === null ? {} : { receivedAmount: money(payment.receivedAmount) }),
   }));
   const total = money(sale.total);
-  const paid = add(...payments.map((payment) => payment.amount));
+  const advanceApplied = money(sale.advanceApplied ?? '0.00');
+  const paid = add(advanceApplied, ...payments.map((payment) => payment.amount));
   return frozenReceipt({
     receiptNumber: sale.receiptNumber ?? null,
     saleId: sale.id,
@@ -342,6 +353,11 @@ export function receiptFromSale(sale: FiledSale, header: ReceiptHeader): Receipt
     // No tax column exists server-side yet, so the slip does not invent one.
     totals: { subtotal: money(sale.subtotal), discount: money(sale.discount), tax: ZERO, total, paid, due: subtract(total, paid) },
     payments,
+    deliveryCharge: money(sale.deliveryCharge ?? '0.00'),
+    otherFeeLabel: sale.otherFeeLabel ?? null,
+    otherFee: money(sale.otherFee ?? '0.00'),
+    advanceApplied,
+    advanceReference: sale.advanceReference ?? null,
   });
 }
 
@@ -352,7 +368,10 @@ export function receiptFromSale(sale: FiledSale, header: ReceiptHeader): Receipt
  * internet returns, so this prints from the cart -- with no receipt number,
  * because that number is not this client's to give out.
  */
-export function provisionalReceipt(input: ReceiptHeader & { lines: readonly SaleLine[]; payments: readonly Payment[]; issuedAt: string }): Receipt {
+export function provisionalReceipt(input: ReceiptHeader & { lines: readonly SaleLine[]; payments: readonly Payment[]; issuedAt: string; total?: MoneyValue; deliveryCharge?: MoneyValue; otherFeeLabel?: string | null; otherFee?: MoneyValue; advanceApplied?: MoneyValue; advanceReference?: string | null }): Receipt {
+  const calculated = calculateSaleTotals(input.lines, input.payments);
+  const total = input.total ?? calculated.total;
+  const advanceApplied = input.advanceApplied ?? ZERO;
   return frozenReceipt({
     receiptNumber: null,
     saleId: null,
@@ -361,8 +380,13 @@ export function provisionalReceipt(input: ReceiptHeader & { lines: readonly Sale
     issuedAt: input.issuedAt,
     customerName: input.customerName ?? null,
     lines: input.lines.map((line) => ({ name: line.name, quantity: String(line.quantity), unitPrice: line.unitPrice, lineTotal: multiply(line.unitPrice, line.quantity) })),
-    totals: calculateSaleTotals(input.lines, input.payments),
+    totals: { ...calculated, total, paid: add(advanceApplied, ...input.payments.map((payment) => payment.amount)), due: subtract(total, add(advanceApplied, ...input.payments.map((payment) => payment.amount))) },
     payments: input.payments,
+    deliveryCharge: input.deliveryCharge ?? ZERO,
+    otherFeeLabel: input.otherFeeLabel ?? null,
+    otherFee: input.otherFee ?? ZERO,
+    advanceApplied,
+    advanceReference: input.advanceReference ?? null,
   });
 }
 
@@ -386,7 +410,10 @@ export function formatReceiptText(receipt: Receipt): string {
   ];
   if (!isZero(receipt.totals.discount)) lines.push(`DISCOUNT ৳${receipt.totals.discount.amount}`);
   if (!isZero(receipt.totals.tax)) lines.push(`TAX ৳${receipt.totals.tax.amount}`);
+  if (receipt.deliveryCharge && !isZero(receipt.deliveryCharge)) lines.push(`DELIVERY ৳${receipt.deliveryCharge.amount}`);
+  if (receipt.otherFee && !isZero(receipt.otherFee)) lines.push(`${(receipt.otherFeeLabel ?? 'OTHER FEE').toUpperCase()} ৳${receipt.otherFee.amount}`);
   lines.push(`TOTAL ৳${receipt.totals.total.amount}`);
+  if (receipt.advanceApplied && !isZero(receipt.advanceApplied)) lines.push(`ADVANCE APPLIED ৳${receipt.advanceApplied.amount}${receipt.advanceReference ? ` (${receipt.advanceReference})` : ''}`);
   lines.push(...receipt.payments.map((payment) => `${payment.method.toUpperCase()} ৳${payment.amount.amount}`));
   if (!isZero(receipt.change)) lines.push(`CHANGE ৳${receipt.change.amount}`);
   return lines.join('\n');

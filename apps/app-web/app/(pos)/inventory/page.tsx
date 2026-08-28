@@ -1,159 +1,107 @@
 'use client';
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { ShelfItem } from '@pharmacy/api';
+import type { InventoryIntake, ShelfItem } from '@pharmacy/api';
 import { colors, spacing, tokens } from '@pharmacy/design-tokens';
+import { toShelfProduct } from '@pharmacy/sync';
 import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
-import { z } from 'zod';
 
+import { IntakeDrawer } from '@/components/intake-drawer';
+import { MedicineFinder, type MedicineSelection } from '@/components/medicine-finder';
 import { pharmacyApi } from '@/lib/api';
 import { useSession } from '@/lib/session';
-import { decimalAmount, fieldIssue, positiveQuantity } from '@/lib/validation';
 
 type StockRow = { storeProductId: string; onHand: string; reserved: string; available: string; lowStock: boolean };
-
-const card: CSSProperties = { background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: 12, padding: spacing.lg };
-const input: CSSProperties = { padding: spacing.sm, borderRadius: 8, border: `1px solid ${colors.border}` };
-const button: CSSProperties = { ...input, cursor: 'pointer', background: colors.primary, color: colors.primaryForeground, border: 'none', fontWeight: tokens.typography.weights.medium };
-
-/**
- * A shelf row as a person recognises it.
- *
- * `GET /products/current` now returns the product name alongside the shelf row, so
- * these lists no longer have to identify a medicine by SKU alone. Receiving a batch
- * against the wrong line is a stock correction and a wasted delivery, and `PARA-500`
- * versus `PARA-650` in a dropdown is exactly the confusion that causes it.
- */
-function shelfLabel(row: ShelfItem): string {
-  return `${row.name} · ${row.sku}`;
-}
-
-/** A delivery is counted in whole units and costed in money; both are checked
- *  here because the server's refusal arrives after the delivery van has left. */
-const receiveBatchSchema = z.object({
-  storeProductId: z.string().min(1),
-  batchNumber: z.string().trim().min(1),
-  unitCost: decimalAmount,
-  quantity: positiveQuantity,
-});
+const surface: CSSProperties = { background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: 12, padding: spacing.lg };
 
 export default function InventoryPage(): ReactNode {
   const { user } = useSession();
   const queryClient = useQueryClient();
-  const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
-  const [form, setForm] = useState({ storeProductId: '', batchNumber: '', expiryDate: '', unitCost: '', quantity: '' });
-
+  const [selection, setSelection] = useState<MedicineSelection | null>(null);
+  const [lastIntake, setLastIntake] = useState<InventoryIntake | null>(null);
   const storeId = user?.storeId ?? null;
 
+  const shelfQuery = useQuery({
+    queryKey: ['inventory', 'shelf'],
+    queryFn: async () => (await pharmacyApi.products.listCurrentStoreProducts()).items,
+    staleTime: 20_000,
+  });
   const stockQuery = useQuery({
     queryKey: ['inventory', 'stock', storeId],
     enabled: storeId !== null,
     queryFn: async () => (await pharmacyApi.inventory.stock(storeId as string)).data,
     staleTime: 15_000,
   });
-  const shelfQuery = useQuery({
-    queryKey: ['inventory', 'shelf'],
-    queryFn: async () => (await pharmacyApi.products.listCurrentStoreProducts()).items,
-    staleTime: 30_000,
-  });
-
-  const stock = stockQuery.data ?? [];
   const shelf = shelfQuery.data ?? [];
-  const labelById = useMemo(() => new Map(shelf.map((row) => [row.id, shelfLabel(row)])), [shelf]);
+  const stock = stockQuery.data ?? [];
+  const stockById = useMemo(() => new Map(stock.map((row) => [row.storeProductId, row])), [stock]);
+  const products = useMemo(
+    () => shelf.map((row) => ({ ...toShelfProduct(row), availableQuantity: stockById.get(row.id)?.available ?? row.availableQuantity })),
+    [shelf, stockById],
+  );
 
-  const parsedForm = receiveBatchSchema.safeParse(form);
-  // An empty field is an unfinished form -- the disabled button covers it. A typed
-  // value that cannot be a cost or a count is worth naming while it is on screen.
-  const unitCostProblem = form.unitCost.trim() === '' ? null : fieldIssue(decimalAmount.safeParse(form.unitCost));
-  const quantityProblem = form.quantity.trim() === '' ? null : fieldIssue(positiveQuantity.safeParse(form.quantity));
-
-  async function receive(): Promise<void> {
-    setError(null);
-    setNote(null);
-    if (!parsedForm.success) return;
-    try {
-      await pharmacyApi.inventory.receiveBatch(
-        {
-          storeProductId: form.storeProductId,
-          batchNumber: form.batchNumber.trim(),
-          ...(form.expiryDate.trim() === '' ? {} : { expiryDate: form.expiryDate }),
-          unitCost: form.unitCost.trim(),
-          quantity: form.quantity.trim(),
-        },
-        { idempotencyKey: `receive-${crypto.randomUUID()}` },
-      );
-      setNote('Batch received.');
-      setForm({ storeProductId: '', batchNumber: '', expiryDate: '', unitCost: '', quantity: '' });
-      await queryClient.invalidateQueries({ queryKey: ['inventory'] });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not receive the batch');
-    }
+  async function refresh(): Promise<void> {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['inventory'] }),
+      queryClient.invalidateQueries({ queryKey: ['pos', 'shelf'] }),
+      queryClient.invalidateQueries({ queryKey: ['catalogue'] }),
+    ]);
   }
 
   return (
-    <main className="split-grid split-grid--wide">
-      <section style={card}>
-        <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Stock ({stock.length})</h2>
-        {stockQuery.isError && (
-          <p role="alert" style={{ margin: 0, color: colors.danger }}>{stockQuery.error instanceof Error ? stockQuery.error.message : 'Could not load stock'}</p>
-        )}
-        {stockQuery.isPending && <p style={{ color: colors.muted }}>Loading…</p>}
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: tokens.typography.sizes.sm }}>
-          <thead>
-            <tr style={{ textAlign: 'left', color: colors.muted }}>
-              <th>Product</th><th>On hand</th><th>Reserved</th><th>Available</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stock.map((row) => (
-              <tr key={row.storeProductId} style={{ color: row.lowStock ? colors.warning : colors.foreground }}>
-                <td style={{ padding: `${spacing.xs} 0` }}>{labelById.get(row.storeProductId) ?? row.storeProductId.slice(0, 8)}</td>
-                <td>{row.onHand}</td>
-                <td>{row.reserved}</td>
-                <td>{row.available}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!stockQuery.isPending && stock.length === 0 && <p style={{ color: colors.muted }}>No stock rows yet.</p>}
+    <main className="split-grid split-grid--wide inventory-page">
+      <section className="surface inventory-intake" style={{ ...surface, display: 'grid', gap: spacing.md }}>
+        <div>
+          <span className="eyebrow">Inventory intake</span>
+          <h1 style={{ margin: `${spacing.xs} 0`, fontSize: tokens.typography.sizes.xl }}>Scan, find, receive</h1>
+          <p style={{ margin: 0, color: colors.muted }}>Existing shelf items and the global medicine catalogue share one receiving flow.</p>
+        </div>
+        <MedicineFinder products={products} actionLabel="Receive" autoFocus onSelect={setSelection} />
+        {(shelfQuery.isError || stockQuery.isError) && <p role="alert" className="form-error">Could not load the current inventory. Cached results may be incomplete.</p>}
       </section>
 
-      <section style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.sm }}>
-        <h2 style={{ margin: 0, fontSize: tokens.typography.sizes.lg }}>Receive batch</h2>
-        <select style={input} value={form.storeProductId} onChange={(event) => setForm({ ...form, storeProductId: event.target.value })}>
-          <option value="">Choose shelf product…</option>
-          {shelf.map((row) => <option key={row.id} value={row.id}>{shelfLabel(row)}</option>)}
-        </select>
-        <input style={input} placeholder="Batch number" value={form.batchNumber} onChange={(event) => setForm({ ...form, batchNumber: event.target.value })} />
-        <input style={input} type="date" value={form.expiryDate} onChange={(event) => setForm({ ...form, expiryDate: event.target.value })} />
+      <section className="surface inventory-stock" style={{ ...surface, display: 'grid', gap: spacing.md }}>
         <div>
-          <input style={{ ...input, width: '100%', boxSizing: 'border-box' }} placeholder="Unit cost, e.g. 5.00" value={form.unitCost} onChange={(event) => setForm({ ...form, unitCost: event.target.value })} inputMode="decimal" />
-          {unitCostProblem !== null && (
-            <p role="alert" style={{ margin: `${spacing.xs} 0 0`, color: colors.danger, fontSize: tokens.typography.sizes.sm }}>{unitCostProblem}</p>
-          )}
+          <span className="eyebrow">Current shelf</span>
+          <h2 style={{ margin: `${spacing.xs} 0`, fontSize: tokens.typography.sizes.lg }}>{stock.length} stocked medicines</h2>
         </div>
-        <div>
-          <input style={{ ...input, width: '100%', boxSizing: 'border-box' }} placeholder="Quantity" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} inputMode="decimal" />
-          {quantityProblem !== null && (
-            <p role="alert" style={{ margin: `${spacing.xs} 0 0`, color: colors.danger, fontSize: tokens.typography.sizes.sm }}>{quantityProblem}</p>
-          )}
-        </div>
-        <button type="button" style={button} disabled={!parsedForm.success} onClick={() => void receive()}>
-          Receive
-        </button>
-        {(error !== null || note !== null || shelfQuery.isError) && (
-          <p role={error !== null ? 'alert' : undefined} style={{ margin: 0, color: error !== null ? colors.danger : colors.success }}>
-            {error ??
-              note ??
-              (shelfQuery.isError
-                ? shelfQuery.error instanceof Error
-                  ? shelfQuery.error.message
-                  : 'Could not load stock'
-                : '')}
-          </p>
+        {lastIntake && (
+          <div role="status" style={{ padding: spacing.md, background: '#e8f3ed', borderRadius: 8 }}>
+            <strong>{lastIntake.name} received</strong>
+            <div style={{ color: colors.muted, fontSize: tokens.typography.sizes.sm }}>On hand {lastIntake.balance.onHand} · available {lastIntake.balance.available} · batch {lastIntake.batch.batchNumber}</div>
+          </div>
         )}
+        <StockTable stock={stock} shelf={shelf} onReceive={(item) => setSelection({ kind: 'local', item: toShelfProduct(item) })} />
       </section>
+
+      {selection && (
+        <IntakeDrawer
+          selection={selection}
+          source="supplier_receive"
+          onClose={() => setSelection(null)}
+          onSaved={(intake) => { setLastIntake(intake); setSelection(null); void refresh(); }}
+        />
+      )}
     </main>
+  );
+}
+
+function StockTable({ stock, shelf, onReceive }: { stock: readonly StockRow[]; shelf: readonly ShelfItem[]; onReceive: (item: ShelfItem) => void }): ReactNode {
+  const names = new Map(shelf.map((row) => [row.id, row]));
+  if (stock.length === 0) return <p style={{ margin: 0, color: colors.muted }}>No inventory yet. Use the search to receive the first medicine.</p>;
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: tokens.typography.sizes.sm }}>
+        <thead><tr style={{ color: colors.muted, textAlign: 'left' }}><th>Medicine</th><th>On hand</th><th>Available</th><th /></tr></thead>
+        <tbody>{stock.map((row) => {
+          const item = names.get(row.storeProductId);
+          return <tr key={row.storeProductId} style={{ borderTop: `1px solid ${colors.border}` }}>
+            <td style={{ padding: `${spacing.sm} 0` }}><strong>{item?.name ?? row.storeProductId}</strong><br /><span style={{ color: colors.muted }}>{item?.sku ?? ''}{item?.rack ? ` · ${item.rack}` : ''}</span></td>
+            <td>{row.onHand}</td><td style={{ color: row.lowStock ? colors.warning : colors.foreground }}>{row.available}</td>
+            <td>{item && <button type="button" className="quiet-action" onClick={() => onReceive(item)}>Receive</button>}</td>
+          </tr>;
+        })}</tbody>
+      </table>
+    </div>
   );
 }

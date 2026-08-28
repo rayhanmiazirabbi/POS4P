@@ -19,6 +19,8 @@ from app.schemas.inventory import (
     BatchAvailableResponse,
     BatchResponse,
     ExpiringBatchResponse,
+    InventoryIntakeRequest,
+    InventoryIntakeResponse,
     LowStockResponse,
     MovementResponse,
     RebuildResultResponse,
@@ -48,6 +50,25 @@ async def require_idempotency_key(
 
 
 IdempotentDep = Annotated[str, Depends(require_idempotency_key)]
+
+
+@router.post(
+    "/intakes",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Envelope[InventoryIntakeResponse],
+    summary="Adopt or update a shelf item and receive stock atomically",
+)
+async def intake_inventory(
+    payload: InventoryIntakeRequest,
+    session: SessionDep,
+    context: ContextDep,
+    request_id: RequestIdDep,
+    idempotency_key: IdempotentDep,
+) -> Envelope[InventoryIntakeResponse]:
+    data = await service.intake_inventory(
+        session, context, payload, idempotency_key=idempotency_key, request_id=request_id
+    )
+    return Envelope(data=InventoryIntakeResponse.model_validate(data), request_id=request_id)
 
 
 def _q(value: object) -> Decimal:
