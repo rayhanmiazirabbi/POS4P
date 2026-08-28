@@ -1,4 +1,4 @@
-import type { ApiResponse, Currency, EntityStatus, Membership, Organization, Pagination, PaymentMethod, Role, Store, StoreMembership, User } from '@pharmacy/types';
+import type { ApiResponse, ConfiguredPaymentMethod, Currency, EntityStatus, Membership, Organization, Pagination, PaymentMethod, PaymentMethodValue, Role, Store, StoreMembership, User } from '@pharmacy/types';
 
 import type { ApiClient, RequestOptions } from './client';
 import type { Page } from './pagination';
@@ -45,6 +45,8 @@ export type OrganizationSettings = {
   lowStockThresholdDays: number;
   allowNegativeStock: boolean;
   receiptFooter: string | null;
+  /** Digital tenders this tenant may book; cash and due are structural and never listed. */
+  paymentMethods: ConfiguredPaymentMethod[];
 };
 
 export type OrganizationSettingsUpdate = Partial<OrganizationSettings>;
@@ -454,7 +456,8 @@ export type Payment = {
   referenceType: string;
   referenceId: string;
   customerId?: string | null;
-  method: PaymentMethod;
+  /** A built-in tender or a tenant-configured digital method slug. */
+  method: PaymentMethodValue;
   amount: string;
   receivedAmount?: string | null;
   status: PaymentStatus;
@@ -505,7 +508,8 @@ export type Sale = {
 };
 
 export type SalePaymentInput = {
-  method: PaymentMethod;
+  /** Must be configured for the organization (or a built-in); the server refuses the rest. */
+  method: PaymentMethodValue;
   amount: string;
   receivedAmount?: string;
   providerReference?: string;
@@ -622,7 +626,7 @@ export function createCashSessionsClient(client: ApiClient): CashSessionsClient 
 
 export type PaymentsClient = {
   list(
-    filters?: { referenceType?: string; referenceId?: string; customerId?: string; method?: PaymentMethod; status?: PaymentStatus },
+    filters?: { referenceType?: string; referenceId?: string; customerId?: string; method?: PaymentMethodValue; status?: PaymentStatus },
     pagination?: Pagination,
     options?: RequestOptions,
   ): Promise<Page<Payment>>;

@@ -147,6 +147,26 @@ export default function PosPage(): ReactNode {
     queryFn: async () => (await pharmacyApi.organizations.readSettings()).data.settings,
     staleTime: 60_000,
   });
+  // The digital tenders this counter may book, exactly as the owner configured
+  // them. Cash and due are structural and never come from this list.
+  const digitalMethods = useMemo(
+    () => (settingsQuery.data?.paymentMethods ?? []).filter((method) => method.active),
+    [settingsQuery.data],
+  );
+
+  // The stored choice can fall out of the configured list (a method renamed
+  // inactive, settings just loaded); re-anchor it to the first real method.
+  useEffect(() => {
+    if (digitalMethods.length === 0) {
+      if (digitalMethod !== '') setDigitalMethod('');
+      if (digitalAmount !== '') setDigitalAmount('');
+      return;
+    }
+    if (!digitalMethods.some((method) => method.value === digitalMethod)) {
+      const first = digitalMethods[0];
+      if (first !== undefined) setDigitalMethod(first.value);
+    }
+  }, [digitalAmount, digitalMethod, digitalMethods, setDigitalAmount, setDigitalMethod]);
   const receiptSettingsQuery = useQuery({
     queryKey: ['receipt-config', user?.organizationId, storeId],
     enabled: Boolean(user?.organizationId && storeId),
@@ -542,6 +562,7 @@ export default function PosPage(): ReactNode {
   const queue: SaleQueueStatus = queueQuery.data ?? emptyQueue;
   const queueProblem = queueQuery.isError && queueQuery.error instanceof Error ? queueQuery.error.message : null;
   const hasUnavailable = cart.some((line) => line.unavailable);
+  const activeMethodLabel = digitalMethods.find((method) => method.value === digitalMethod)?.label ?? digitalMethod;
 
   function holdCurrentCart(): void {
     if (!holdActive()) { setError('Add an item before holding this cart.'); return; }
@@ -685,21 +706,25 @@ export default function PosPage(): ReactNode {
             <span>Cash received</span>
             <span className="payment-input"><PosIcon name="cash" /><input ref={cashInputRef} value={cashReceived} onChange={(event) => setCashReceived(decimalEntry(event.target.value))} placeholder={dueNow.amount} inputMode="decimal" /></span>
           </label>
-          <label className="payment-field">
-            <span>Digital ({digitalMethod}) amount</span>
-            <span className="payment-input"><PosIcon name="phone" /><input ref={digitalInputRef} value={digitalAmount} onChange={(event) => setDigitalAmount(decimalEntry(event.target.value))} placeholder="0.00" inputMode="decimal" /></span>
-          </label>
+          {digitalMethods.length > 0 && (
+            <label className="payment-field">
+              <span>Digital ({activeMethodLabel}) amount</span>
+              <span className="payment-input"><PosIcon name="phone" /><input ref={digitalInputRef} value={digitalAmount} onChange={(event) => setDigitalAmount(decimalEntry(event.target.value))} placeholder="0.00" inputMode="decimal" /></span>
+            </label>
+          )}
         </section>
-        <div className="payment-methods" aria-label="Digital payment method">
-          {(['bkash', 'nagad'] as const).map((method) => (
-            <button key={method} type="button" className={digitalMethod === method ? 'payment-method payment-method--active' : 'payment-method'} aria-pressed={digitalMethod === method} onClick={() => setDigitalMethod(method)}>
-              <span className={`payment-mark payment-mark--${method}`} aria-hidden="true">{method === 'bkash' ? '➤' : '●'}</span>{method}
-            </button>
-          ))}
-        </div>
+        {digitalMethods.length > 0 && (
+          <div className="payment-methods" aria-label="Digital payment method">
+            {digitalMethods.map((method) => (
+              <button key={method.value} type="button" className={digitalMethod === method.value ? 'payment-method payment-method--active' : 'payment-method'} aria-pressed={digitalMethod === method.value} onClick={() => setDigitalMethod(method.value)}>
+                <span className={`payment-mark${method.value === 'nagad' ? ' payment-mark--nagad' : ''}`} aria-hidden="true">{method.value === 'bkash' ? '➤' : '●'}</span>{method.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="tender-summary">
-          <span><PosIcon name="wallet" /> Cash ৳{split.cash} <i>·</i> {digitalMethod} ৳{split.digital}</span>
+          <span><PosIcon name="wallet" /> Cash ৳{split.cash} {activeMethodLabel !== '' && <><i>·</i> {activeMethodLabel} ৳{split.digital}</>}</span>
           <strong className={split.due === '0.00' ? '' : 'has-due'}>Due ৳{split.due}</strong>
         </div>
         {!split.readable && (

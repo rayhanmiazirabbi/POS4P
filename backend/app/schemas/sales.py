@@ -7,7 +7,6 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from app.domains.payments import PaymentMethod
 from app.domains.sales import SaleChannel, SaleStatus
 from app.schemas.base import ApiModel
 from app.schemas.payments import Money, PaymentResponse
@@ -44,7 +43,9 @@ class AdvanceApplicationInput(ApiModel):
 
 
 class PaymentInput(ApiModel):
-    method: PaymentMethod
+    # A configured method slug, not the built-in enum: tenants define their own
+    # digital tenders. The service checks it against organization settings.
+    method: Annotated[str, Field(min_length=2, max_length=40, pattern=r"^[a-z][a-z0-9_-]*$")]
     amount: Money
     received_amount: Money | None = None
     provider_reference: Annotated[str | None, Field(max_length=160)] = None

@@ -6,7 +6,7 @@ export type Role = 'owner' | 'manager' | 'cashier' | 'inventory_staff';
 export type EntityStatus = 'active' | 'inactive' | 'suspended';
 
 /**
- * The tenders the platform accepts, mirroring `PaymentMethod` in
+ * The built-in tenders, mirroring `PaymentMethod` in
  * `backend/app/domains/payments.py`.
  *
  * Here rather than in one feature package because two of them disagreed:
@@ -16,6 +16,17 @@ export type EntityStatus = 'active' | 'inactive' | 'suspended';
  * the breakdown silently defining its own idea of what a shop can take.
  */
 export type PaymentMethod = 'cash' | 'bkash' | 'nagad' | 'due';
+
+/**
+ * What a payment row can carry: a built-in above, or any digital tender the
+ * tenant has configured in organization settings (`paymentMethods`). The
+ * `(string & {})` member keeps literal autocomplete for the built-ins while
+ * accepting configured slugs like `'rocket'` without a cast.
+ */
+export type PaymentMethodValue = PaymentMethod | (string & {});
+
+/** One tenant-configured digital tender; `cash` and `due` are structural and never listed. */
+export type ConfiguredPaymentMethod = { value: string; label: string; active: boolean };
 
 export type Organization = {
   id: UUID; name: string; slug: string; status: EntityStatus; createdAt: ISODateTime;

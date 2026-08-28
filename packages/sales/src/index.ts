@@ -1,11 +1,14 @@
 import { add, allocate, compare, isNegative, isZero, money, multiply, round, subtract, tryMoney, type MoneyValue } from '@pharmacy/money';
-import type { PaymentMethod } from '@pharmacy/types';
+import type { PaymentMethodValue } from '@pharmacy/types';
+
+/** The old name every caller still uses; the value space simply grew. */
+type PaymentMethod = PaymentMethodValue;
 
 export type SaleLine = { id: string; productId: string; name: string; quantity: number; unitPrice: MoneyValue; discount: MoneyValue; tax: MoneyValue };
 
-/** Re-exported from `@pharmacy/types` so a tender this package will happily build
- *  cannot be one the backend enum refuses. */
-export type { PaymentMethod };
+/** Re-exported from `@pharmacy/types`: a built-in tender or one the tenant configured. */
+export type { PaymentMethodValue };
+export type { PaymentMethodValue as PaymentMethod };
 
 /**
  * One tender against a sale, mirroring `PaymentInput` in
@@ -16,11 +19,12 @@ export type { PaymentMethod };
  * change from the difference. It is required on cash and refused elsewhere --
  * `validateSalePayments` holds both rules.
  */
-export type Payment = { method: PaymentMethod; amount: MoneyValue; receivedAmount?: MoneyValue; providerReference?: string };
+export type Payment = { method: PaymentMethodValue; amount: MoneyValue; receivedAmount?: MoneyValue; providerReference?: string };
 
 /** The wallet tenders, as distinct from cash (which takes change) and due (which
- *  needs a customer). */
-export type DigitalMethod = Extract<PaymentMethod, 'bkash' | 'nagad'>;
+ *  needs a customer). A configured slug, chosen from organization settings --
+ *  cash and due never appear here. */
+export type DigitalMethod = string;
 
 /** `paid` is every tender including `due`, so `due` here is the unpaid remainder
  *  of the cart -- not the balance booked against a customer's account. A sale is

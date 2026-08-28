@@ -41,10 +41,10 @@ CENT = Decimal("0.01")
 
 #: A ``due`` payment records a receivable, not money in the drawer. It belongs in
 #: the breakdown so the day is explainable, but never in the collected total.
-#: Keyed on the wire string because ``use_enum_values`` can hand back either form.
-COLLECTED_METHODS = frozenset(
-    method.value for method in PaymentMethod if method is not PaymentMethod.DUE
-)
+#: Everything else -- built-in cash, named wallets, tenant-configured methods --
+#: crossed the counter, so collected is "any method but due" rather than a fixed
+#: list that would silently exclude a method the tenant added later.
+DUE_METHOD = PaymentMethod.DUE.value
 
 
 def collected_from(breakdown: dict[str, Decimal]) -> Decimal:
@@ -55,7 +55,7 @@ def collected_from(breakdown: dict[str, Decimal]) -> Decimal:
     reproduce the incremental figure, and two copies of this sum would not.
     """
     return sum(
-        (amount for method, amount in breakdown.items() if method in COLLECTED_METHODS),
+        (amount for method, amount in breakdown.items() if method != DUE_METHOD),
         Decimal(0),
     ).quantize(CENT)
 

@@ -4,7 +4,8 @@ import { create } from 'zustand';
 
 import type { PrintableReceipt } from './receipt';
 
-export type DigitalMethod = 'bkash' | 'nagad';
+/** A configured digital tender slug ("bkash", "rocket", ...), from organization settings. */
+export type DigitalMethod = string;
 
 type PosUiState = {
   cashReceived: string;
@@ -26,7 +27,7 @@ type PosUiState = {
 export const usePosUi = create<PosUiState>()((set) => ({
   cashReceived: '',
   digitalAmount: '',
-  digitalMethod: 'bkash',
+  digitalMethod: '',
   receipt: null,
   setCashReceived: (cashReceived) => set({ cashReceived }),
   setDigitalAmount: (digitalAmount) => set({ digitalAmount }),

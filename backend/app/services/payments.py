@@ -10,6 +10,8 @@ from app.context import RequestContext
 from app.domains.customers import Customer
 from app.domains.payments import Payment, PaymentMethod, PaymentRefund, PaymentStatus
 from app.errors import Conflict, NotFound, ValidationError
+from app.models import Organization
+from app.schemas.organizations import OrganizationSettings
 from app.security import utc_now
 from app.services.audit import record_audit
 
@@ -20,12 +22,30 @@ CENT = Decimal("0.01")
 #: cannot be recalled. Refunding in this order keeps the till whole and leaves the
 #: customer no worse off, since the debt they no longer owe is worth the same as
 #: the note they would have been handed.
-REFUND_PRIORITY: tuple[PaymentMethod, ...] = (
-    PaymentMethod.DUE,
-    PaymentMethod.BKASH,
-    PaymentMethod.NAGAD,
-    PaymentMethod.CASH,
+REFUND_PRIORITY: tuple[str, ...] = (
+    PaymentMethod.DUE.value,
+    PaymentMethod.BKASH.value,
+    PaymentMethod.NAGAD.value,
+    PaymentMethod.CASH.value,
 )
+
+
+async def allowed_payment_methods(session: AsyncSession, context: RequestContext) -> set[str]:
+    """Every tender this organization may book right now.
+
+    Built-ins plus the tenant's configured digital methods: a payment against a
+    method the org never configured is a typo or a stale terminal, and the sooner
+    it is refused the fewer books have to be unwound.
+    """
+    organization = await session.get(Organization, context.organization_id)
+    settings = (
+        OrganizationSettings.model_validate(organization.settings)
+        if organization is not None and organization.settings
+        else OrganizationSettings()
+    )
+    return {PaymentMethod.CASH.value, PaymentMethod.DUE.value} | {
+        method.value for method in settings.payment_methods if method.active
+    }
 
 
 async def load_payment(
@@ -42,7 +62,7 @@ async def load_payment(
 
 def change_due(payment: Payment) -> Decimal:
     """Cash change owed to the customer: received minus charged."""
-    if payment.method is not PaymentMethod.CASH or payment.received_amount is None:
+    if payment.method != PaymentMethod.CASH.value or payment.received_amount is None:
         return Decimal("0.00")
     return (Decimal(payment.received_amount) - Decimal(payment.amount)).quantize(
         Decimal("0.01")
@@ -101,11 +121,19 @@ async def refund_payments(
     refunds: list[PaymentRefund] = []
     now = utc_now()
 
-    for method in REFUND_PRIORITY:
+    # Tenant-configured methods are not in REFUND_PRIORITY, so a wildcard pass
+    # sits where they all belong: after due, before the named wallets and cash.
+    # A configured wallet reverses as cheaply as a named one.
+    known = set(REFUND_PRIORITY)
+    order: list[str | None] = [PaymentMethod.DUE.value, None, *REFUND_PRIORITY[1:]]
+    for method in order:
         for payment in payments:
             if remaining <= 0:
                 break
-            if payment.method is not method or payment.status is not PaymentStatus.CAPTURED:
+            matches = (
+                payment.method not in known if method is None else payment.method == method
+            )
+            if not matches or payment.status is not PaymentStatus.CAPTURED:
                 continue
             available = Decimal(payment.amount) - already.get(payment.id, Decimal(0))
             take = min(remaining, available).quantize(CENT)
@@ -123,7 +151,7 @@ async def refund_payments(
             refunds.append(refund)
             remaining -= take
 
-            if payment.method is PaymentMethod.DUE and payment.customer_id is not None:
+            if payment.method == PaymentMethod.DUE.value and payment.customer_id is not None:
                 customer = await session.get(Customer, payment.customer_id)
                 if customer is not None:
                     customer.due_balance = max(
@@ -166,7 +194,7 @@ async def create_sale_payment(
     context: RequestContext,
     *,
     sale,
-    method: PaymentMethod,
+    method: str,
     amount: Decimal,
     received_amount: Decimal | None = None,
     provider_reference: str | None = None,
@@ -178,7 +206,9 @@ async def create_sale_payment(
     ``due`` tenders book the debt against the sale's customer. No commit happens
     here so the sales service can compose every row into one transaction.
     """
-    method = PaymentMethod(method)
+    method = str(method).strip().lower()
+    if method not in await allowed_payment_methods(session, context):
+        raise ValidationError(f"Payment method '{method}' is not configured for this organization")
     amount = Decimal(amount).quantize(Decimal("0.01"))
     if amount < 0:
         raise ValidationError("Payment amount cannot be negative")
@@ -186,7 +216,7 @@ async def create_sale_payment(
         received = Decimal(received_amount).quantize(Decimal("0.01"))
     else:
         received = None
-    if method is PaymentMethod.CASH:
+    if method == PaymentMethod.CASH.value:
         if received is None:
             raise ValidationError("Cash payments require a received amount")
         if received < amount:
@@ -195,7 +225,7 @@ async def create_sale_payment(
         raise Conflict("Only cash payments may carry change")
 
     customer_id = sale.customer_id
-    if method is PaymentMethod.DUE:
+    if method == PaymentMethod.DUE.value:
         if customer_id is None:
             raise ValidationError("Due payments require a customer on the sale")
         customer = await session.get(Customer, customer_id)
@@ -211,7 +241,7 @@ async def create_sale_payment(
         customer_id=customer_id,
         method=method,
         amount=amount,
-        received_amount=received if method is PaymentMethod.CASH else received,
+        received_amount=received,
         status=PaymentStatus.CAPTURED,
         provider_reference=provider_reference,
         idempotency_key=idempotency_key,
@@ -226,7 +256,7 @@ async def create_sale_payment(
         entity_type="payment",
         entity_id=payment.id,
         request_id=request_id,
-        after={"method": method.value, "amount": str(amount), "sale_id": str(sale.id)},
+        after={"method": method, "amount": str(amount), "sale_id": str(sale.id)},
     )
     return payment, change_due(payment)
 
@@ -277,7 +307,7 @@ async def list_payments(
     reference_type: str | None = None,
     reference_id: UUID | None = None,
     customer_id: UUID | None = None,
-    method: PaymentMethod | None = None,
+    method: str | None = None,
     status: PaymentStatus | None = None,
     limit: int = 25,
     offset: int = 0,

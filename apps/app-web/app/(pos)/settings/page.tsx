@@ -1,6 +1,7 @@
 'use client';
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { ConfiguredPaymentMethod } from '@pharmacy/types';
 import { money } from '@pharmacy/money';
 import { provisionalReceipt } from '@pharmacy/sales';
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
@@ -75,6 +76,10 @@ export default function SettingsPage(): ReactNode {
 
   const [organization, setOrganization] = useState(blankOrganization);
   const [organizationSaved, setOrganizationSaved] = useState(blankOrganization);
+  const [methods, setMethods] = useState<ConfiguredPaymentMethod[]>([]);
+  const [methodsSaved, setMethodsSaved] = useState<ConfiguredPaymentMethod[]>([]);
+  const [methodValue, setMethodValue] = useState('');
+  const [methodLabel, setMethodLabel] = useState('');
   const [branch, setBranch] = useState(blankBranch);
   const [branchSaved, setBranchSaved] = useState(blankBranch);
   const [receipt, setReceipt] = useState<ReceiptConfig>(defaultReceiptConfig);
@@ -85,7 +90,8 @@ export default function SettingsPage(): ReactNode {
   const [organizationStatus, setOrganizationStatus] = useState<string | null>(null);
   const [branchStatus, setBranchStatus] = useState<string | null>(null);
   const [receiptStatus, setReceiptStatus] = useState<string | null>(null);
-  const [saving, setSaving] = useState<'organization' | 'branch' | 'receipt' | null>(null);
+  const [methodsStatus, setMethodsStatus] = useState<string | null>(null);
+  const [saving, setSaving] = useState<'organization' | 'branch' | 'receipt' | 'methods' | null>(null);
 
   useEffect(() => {
     if (!profileQuery.data || !organizationQuery.data) return;
@@ -97,6 +103,8 @@ export default function SettingsPage(): ReactNode {
       allowNegativeStock: organizationQuery.data.allowNegativeStock, receiptFooter: organizationQuery.data.receiptFooter ?? '',
     };
     setOrganization(next); setOrganizationSaved(next);
+    const nextMethods = organizationQuery.data.paymentMethods ?? [];
+    setMethods(nextMethods); setMethodsSaved(nextMethods);
   }, [profileQuery.data, organizationQuery.data]);
 
   useEffect(() => {
@@ -115,6 +123,7 @@ export default function SettingsPage(): ReactNode {
   }, [branchQuery.data, organizationQuery.data?.receiptFooter]);
 
   const organizationDirty = useMemo(() => JSON.stringify(organization) !== JSON.stringify(organizationSaved), [organization, organizationSaved]);
+  const methodsDirty = useMemo(() => JSON.stringify(methods) !== JSON.stringify(methodsSaved), [methods, methodsSaved]);
   const branchDirty = useMemo(() => JSON.stringify(branch) !== JSON.stringify(branchSaved), [branch, branchSaved]);
   const receiptDirty = useMemo(() => JSON.stringify(receipt) !== JSON.stringify(receiptSaved) || branchFooter !== branchFooterSaved, [branchFooter, branchFooterSaved, receipt, receiptSaved]);
   const effectiveFooter = branchFooter.trim() || organization.receiptFooter.trim() || organizationQuery.data?.receiptFooter?.trim() || null;
@@ -153,6 +162,32 @@ export default function SettingsPage(): ReactNode {
         await queryClient.invalidateQueries({ queryKey: ['receipt-config', user.organizationId, user.storeId] });
       }
     } catch (cause) { setOrganizationStatus(cause instanceof Error ? cause.message : 'Could not save organization settings.'); }
+    finally { setSaving(null); }
+  }
+
+  function addPaymentMethod(): void {
+    const value = methodValue.trim().toLowerCase();
+    const label = methodLabel.trim();
+    setMethodsStatus(null);
+    if (!/^[a-z][a-z0-9_-]*$/.test(value)) { setMethodsStatus('Method key: lowercase letters, digits, hyphen; starts with a letter.'); return; }
+    if (value === 'cash' || value === 'due') { setMethodsStatus('Cash and due are built in and cannot be configured.'); return; }
+    if (methods.some((method) => method.value === value)) { setMethodsStatus(`“${value}” is already configured.`); return; }
+    if (label.length < 1) { setMethodsStatus('Give the method a display name.'); return; }
+    setMethods([...methods, { value, label, active: true }]);
+    setMethodValue(''); setMethodLabel('');
+  }
+
+  async function savePaymentMethods(event: FormEvent): Promise<void> {
+    event.preventDefault(); setMethodsStatus(null);
+    // An empty list is legitimate: a cash-only shop. Cash and due are structural
+    // and always work regardless of what is configured here.
+    setSaving('methods');
+    try {
+      await pharmacyApi.organizations.updateSettings({ paymentMethods: methods });
+      setMethodsSaved(methods); setMethodsStatus('Payment methods saved.');
+      await queryClient.invalidateQueries({ queryKey: ['settings', 'organization'] });
+      await queryClient.invalidateQueries({ queryKey: ['organization', 'settings'] });
+    } catch (cause) { setMethodsStatus(cause instanceof Error ? cause.message : 'Could not save payment methods.'); }
     finally { setSaving(null); }
   }
 
@@ -227,6 +262,32 @@ export default function SettingsPage(): ReactNode {
             <Toggle label="Allow negative inventory balances" checked={organization.allowNegativeStock} onChange={(checked) => setOrganization({ ...organization, allowNegativeStock: checked })} />
           </div>
           <FormFooter dirty={organizationDirty} status={organizationStatus} saving={saving === 'organization'} />
+        </form>
+      </SettingsSection>}
+
+      {owner && <SettingsSection title="Payment methods" description="The digital tenders every branch can accept. Cash and customer due are built in." dirty={methodsDirty} loading={organizationQuery.isPending}>
+        <form className="settings-form" onSubmit={(event) => void savePaymentMethods(event)}>
+          <ul className="payment-method-admin-list">
+            {methods.map((method, index) => (
+              <li key={method.value} className="payment-method-admin-row">
+                <code>{method.value}</code>
+                <input className="field" aria-label={`Display name for ${method.value}`} maxLength={40} value={method.label}
+                  onChange={(event) => setMethods(methods.map((entry, position) => position === index ? { ...entry, label: event.target.value } : entry))} />
+                <label className="toggle-row"><span>Active</span><input type="checkbox" checked={method.active}
+                  onChange={(event) => setMethods(methods.map((entry, position) => position === index ? { ...entry, active: event.target.checked } : entry))} /></label>
+                <button type="button" className="quiet-action danger-action" aria-label={`Remove ${method.label}`}
+                  onClick={() => setMethods(methods.filter((_, position) => position !== index))}>Remove</button>
+              </li>
+            ))}
+            {methods.length === 0 && <li className="empty-copy">No digital methods configured — this organization sells for cash and due only.</li>}
+          </ul>
+          <div className="payment-method-add-row">
+            <Field label="Method key"><input className="field" placeholder="rocket" maxLength={40} value={methodValue} onChange={(event) => setMethodValue(event.target.value.toLowerCase())} /></Field>
+            <Field label="Display name"><input className="field" placeholder="Rocket" maxLength={40} value={methodLabel} onChange={(event) => setMethodLabel(event.target.value)} /></Field>
+            <button type="button" className="quiet-action" onClick={addPaymentMethod}>Add method</button>
+          </div>
+          <p className="settings-help">The key is permanent once saved — payment history refers to it. Removing a method hides it from the counter; past sales keep it.</p>
+          <FormFooter dirty={methodsDirty} status={methodsStatus} saving={saving === 'methods'} />
         </form>
       </SettingsSection>}
 

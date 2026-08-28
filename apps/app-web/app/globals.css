@@ -134,6 +134,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .settings-group h3 { margin: 0; font-size: 13px; }
 .settings-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .settings-help { margin: -3px 0 0; color: var(--pos-muted); font-size: 11px; white-space: pre-line; }
+.payment-method-admin-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.payment-method-admin-row { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 10px; }
+.payment-method-admin-row code { padding: 6px 9px; background: var(--pos-soft); border-radius: 6px; font-size: 12px; }
+.payment-method-add-row { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: 10px; }
+@media (max-width: 720px) {
+  .payment-method-admin-row { grid-template-columns: 1fr 1fr; }
+  .payment-method-add-row { grid-template-columns: 1fr; }
+}
 .segmented-control { display: inline-flex; padding: 2px; background: var(--pos-soft); border-radius: 8px; }
 .segmented-control button { min-height: 29px; padding: 4px 9px; color: var(--pos-muted); background: transparent; border: 0; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 700; }
 .segmented-control button.is-active { color: var(--pos-ink); background: #fff; box-shadow: 0 1px 3px rgba(20,40,30,.1); }

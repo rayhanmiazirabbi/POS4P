@@ -36,6 +36,31 @@ def normalize_slug(value: str) -> str:
     return candidate
 
 
+class PaymentMethodSetting(ApiModel):
+    """One tenant-configured digital tender, e.g. bKash or a card machine.
+
+    ``value`` is the ledger key written to ``payments.method`` and is the one
+    immutable field: renaming it would orphan the payment history that holds it.
+    Cash and due are structural (the drawer, the customer's account) and are not
+    configured here.
+    """
+
+    value: Annotated[str, Field(min_length=2, max_length=40, pattern=r"^[a-z][a-z0-9_-]*$")]
+    label: Annotated[str, Field(min_length=1, max_length=40)]
+    active: bool = True
+
+
+def _validate_payment_methods(methods: list[PaymentMethodSetting]) -> list[PaymentMethodSetting]:
+    seen: set[str] = set()
+    for method in methods:
+        if method.value in ("cash", "due"):
+            raise ValueError(f"'{method.value}' is built in and cannot be configured")
+        if method.value in seen:
+            raise ValueError(f"Duplicate payment method '{method.value}'")
+        seen.add(method.value)
+    return methods
+
+
 class OrganizationSettings(ApiModel):
     """Tenant-wide defaults.
 
@@ -51,6 +76,12 @@ class OrganizationSettings(ApiModel):
     low_stock_threshold_days: Annotated[int, Field(ge=1, le=180)] = 14
     allow_negative_stock: bool = False
     receipt_footer: str | None = None
+    payment_methods: Annotated[
+        list[PaymentMethodSetting], Field(default_factory=lambda: [
+            PaymentMethodSetting(value="bkash", label="bKash"),
+            PaymentMethodSetting(value="nagad", label="Nagad"),
+        ])
+    ]
 
     @field_validator("default_timezone")
     @classmethod
@@ -61,6 +92,11 @@ class OrganizationSettings(ApiModel):
     @classmethod
     def _supported_currency(cls, value: str) -> str:
         return normalize_currency(value)
+
+    @field_validator("payment_methods")
+    @classmethod
+    def _valid_payment_methods(cls, value: list[PaymentMethodSetting]) -> list[PaymentMethodSetting]:
+        return _validate_payment_methods(value)
 
 
 class OrganizationSettingsUpdate(ApiModel):
@@ -74,6 +110,7 @@ class OrganizationSettingsUpdate(ApiModel):
     low_stock_threshold_days: Annotated[int | None, Field(ge=1, le=180)] = None
     allow_negative_stock: bool | None = None
     receipt_footer: str | None = None
+    payment_methods: list[PaymentMethodSetting] | None = None
 
     @field_validator("default_timezone")
     @classmethod
@@ -84,6 +121,11 @@ class OrganizationSettingsUpdate(ApiModel):
     @classmethod
     def _supported_currency(cls, value: str | None) -> str | None:
         return None if value is None else normalize_currency(value)
+
+    @field_validator("payment_methods")
+    @classmethod
+    def _valid_payment_methods(cls, value: list[PaymentMethodSetting] | None) -> list[PaymentMethodSetting] | None:
+        return None if value is None else _validate_payment_methods(value)
 
 
 class OrganizationCreateRequest(ApiModel):

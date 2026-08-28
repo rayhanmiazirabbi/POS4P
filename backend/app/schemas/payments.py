@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import Field
 
-from app.domains.payments import PaymentMethod, PaymentStatus
+from app.domains.payments import PaymentStatus
 from app.schemas.base import ApiModel
 
 Money = Annotated[Decimal, Field(ge=0, decimal_places=2)]
@@ -20,7 +20,8 @@ class PaymentResponse(ApiModel):
     reference_type: str
     reference_id: UUID
     customer_id: UUID | None = None
-    method: PaymentMethod
+    # The tender's slug: a built-in ("cash", "due") or a tenant-configured method.
+    method: str
     amount: Decimal
     received_amount: Decimal | None = None
     status: PaymentStatus

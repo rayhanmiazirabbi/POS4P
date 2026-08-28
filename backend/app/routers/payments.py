@@ -11,7 +11,7 @@ from app.dependencies import (
     SessionDep,
     require_roles,
 )
-from app.domains.payments import PaymentMethod, PaymentStatus
+from app.domains.payments import PaymentStatus
 from app.models import Role
 from app.schemas.base import Envelope, Page
 from app.schemas.payments import PaymentResponse, PaymentStatusUpdateRequest
@@ -34,7 +34,7 @@ async def list_payments(
     reference_type: Annotated[str | None, Query(alias="referenceType")] = None,
     reference_id: Annotated[UUID | None, Query(alias="referenceId")] = None,
     customer_id: Annotated[UUID | None, Query(alias="customerId")] = None,
-    method: PaymentMethod | None = None,
+    method: str | None = None,
     payment_status: Annotated[PaymentStatus | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
     offset: Annotated[int, Query(ge=0)] = 0,

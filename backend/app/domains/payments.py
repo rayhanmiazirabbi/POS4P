@@ -38,7 +38,10 @@ class Payment(StoreScopedMixin, UUIDPrimaryKeyMixin, Base):
     reference_type: Mapped[str] = mapped_column(String(40), nullable=False)
     reference_id: Mapped[UUID] = mapped_column(nullable=False)
     customer_id: Mapped[UUID | None] = mapped_column(ForeignKey("customers.id"))
-    method: Mapped[PaymentMethod] = mapped_column(nullable=False)
+    # A plain string, not the enum: methods are configured per organization, so
+    # the column holds built-in values ("cash", "due") alongside whatever each
+    # tenant defines. PaymentMethod remains the vocabulary for the built-ins.
+    method: Mapped[str] = mapped_column(String(40), nullable=False)
     amount: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
     received_amount: Mapped[Decimal | None] = mapped_column(money_column())
     status: Mapped[PaymentStatus] = mapped_column(default=PaymentStatus.CAPTURED, nullable=False)
