@@ -19,13 +19,19 @@ const BD_MOBILE = /^(?:\+?880|0)?1[3-9]\d{8}$/;
  * Enter takes the first row -- the best existing match when there is one, the
  * "add as new" row when there is not -- so a cashier never has to reach for the
  * mouse mid-sale. Arrow keys walk the rows, Escape returns to the input.
+ *
+ * With a customer attached, their recent purchases from this branch fold out
+ * under the chip: "what did you buy last time" is the question the counter
+ * actually asks, and it should not cost a walk to the reports page.
  */
 export function CustomerCombobox({
+  selectedId,
   selectedLabel,
   onSelect,
   onClear,
   onError,
 }: {
+  selectedId: string | null;
   selectedLabel: string | null;
   onSelect: (pick: CustomerPick) => void;
   onClear: () => void;
@@ -36,6 +42,7 @@ export function CustomerCombobox({
   const [debounced, setDebounced] = useState('');
   const [creating, setCreating] = useState(false);
   const [pendingSubmit, setPendingSubmit] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -52,6 +59,15 @@ export function CustomerCombobox({
     staleTime: 15_000,
   });
   const matches = searchQuery.data?.items ?? [];
+  // This branch's sales to the attached customer, newest first -- the same
+  // staff-scoped list the counter already sells against, not the owner-only
+  // cross-store history, so a cashier sees exactly what they may act on.
+  const historyQuery = useQuery({
+    queryKey: ['pos', 'customer-history', selectedId],
+    enabled: selectedId !== null && online,
+    staleTime: 30_000,
+    queryFn: async () => (await pharmacyApi.sales.list({ customerId: selectedId as string }, { limit: 8 })).items,
+  });
   // The rows a keyboard walks: every match, then the new-customer row last, so the
   // list always has one way forward even when nothing matched.
   const rowCount = matches.length + 1;
@@ -151,6 +167,40 @@ export function CustomerCombobox({
           </button>
         )}
       </div>
+      {selectedId !== null && term === '' && (
+        <div className="customer-history">
+          <button
+            type="button"
+            className="customer-history-toggle"
+            aria-expanded={historyOpen}
+            onClick={() => { setHistoryOpen((open) => !open); if (!historyOpen) void historyQuery.refetch(); }}
+          >
+            Recent purchases{historyQuery.data !== undefined ? ` (${historyQuery.data.length})` : ''}
+            <span aria-hidden="true">{historyOpen ? '▴' : '▾'}</span>
+          </button>
+          {historyOpen && (
+            <div className="customer-history-list">
+              {historyQuery.isLoading && <p className="finder-note" role="status">Loading purchases…</p>}
+              {historyQuery.isError && <p className="finder-note" role="alert">Could not load purchases. Retry in a moment.</p>}
+              {!online && <p className="finder-note" role="alert">Connect to see this customer&rsquo;s purchases.</p>}
+              {online && !historyQuery.isLoading && !historyQuery.isError && (historyQuery.data ?? []).length === 0 && (
+                <p className="finder-note">No purchases at this branch yet.</p>
+              )}
+              {(historyQuery.data ?? []).map((sale) => (
+                <div key={sale.id} className="customer-history-row">
+                  <span className="customer-history-head">
+                    <strong>{sale.receiptNumber ?? 'Sale'}</strong>
+                    <small>{new Date(sale.createdAt).toLocaleDateString()} · ৳{sale.total}{sale.status !== 'completed' ? ` · ${sale.status}` : ''}</small>
+                  </span>
+                  <small className="customer-history-items">
+                    {sale.items.map((item) => `${Number(item.quantity) % 1 === 0 ? Number(item.quantity) : item.quantity}× ${item.productName}`).join(', ')}
+                  </small>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {term !== '' && (
         <div className="customer-suggest" role="listbox" aria-label="Customer matches">
           {matches.map((match, index) => (

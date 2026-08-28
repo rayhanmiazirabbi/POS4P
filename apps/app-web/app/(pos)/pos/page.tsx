@@ -256,6 +256,7 @@ export default function PosPage(): ReactNode {
         void queryClient.invalidateQueries({ queryKey: ['inventory'] });
         // Queued sales that carried cash change what the drawer should hold.
         void queryClient.invalidateQueries({ queryKey: ['pos', 'cash-session'] });
+        void queryClient.invalidateQueries({ queryKey: ['pos', 'customer-history'] });
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Upload failed');
@@ -497,6 +498,7 @@ export default function PosPage(): ReactNode {
         refetchShelf();
         void queryClient.invalidateQueries({ queryKey: ['inventory'] });
         void queryClient.invalidateQueries({ queryKey: ['pos', 'cash-session'] });
+        void queryClient.invalidateQueries({ queryKey: ['pos', 'customer-history'] });
       } else {
         throw { code: 'NETWORK_ERROR' };
       }
@@ -685,6 +687,7 @@ export default function PosPage(): ReactNode {
         {pricing.problem && <p role="alert" className="form-error" style={{ margin: 0 }}>{pricing.problem}</p>}
 
         <CustomerCombobox
+          selectedId={customerId}
           selectedLabel={customerName}
           onSelect={(pick) => {
             updateActive((current) => ({ ...current, customerId: pick.id, customerName: pick.label }));
@@ -826,6 +829,7 @@ export default function PosPage(): ReactNode {
           refetchShelf();
           void queryClient.invalidateQueries({ queryKey: ['inventory'] });
           void queryClient.invalidateQueries({ queryKey: ['pos', 'cash-session'] });
+          void queryClient.invalidateQueries({ queryKey: ['pos', 'customer-history'] });
         }}
       />
     )}
