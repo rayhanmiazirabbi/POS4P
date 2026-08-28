@@ -6,6 +6,7 @@ from app.domains.billing import (
     OrganizationSubscription,
     SubscriptionStatus,
 )
+from app.domains.cash import CashSession, CashSessionStatus
 from app.domains.catalog import (
     ActiveIngredient,
     CatalogAlias,
@@ -85,6 +86,8 @@ __all__ = [
     "CatalogProductIngredient",
     "CatalogRevision",
     "CatalogSourceRef",
+    "CashSession",
+    "CashSessionStatus",
     "Customer",
     "CustomerAddress",
     "DailyStoreMetric",

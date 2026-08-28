@@ -368,6 +368,7 @@ export type PharmacyApi = {
   suppliers: SuppliersClient;
   sales: SalesClient;
   payments: PaymentsClient;
+  cashSessions: CashSessionsClient;
   customers: CustomersClient;
   reports: ReportsClient;
   sync: SyncClient;
@@ -392,6 +393,7 @@ export function createPharmacyApi(client: ApiClient): PharmacyApi {
     suppliers: createSuppliersClient(client),
     sales: createSalesClient(client),
     payments: createPaymentsClient(client),
+    cashSessions: createCashSessionsClient(client),
     customers: createCustomersClient(client),
     reports: createReportsClient(client),
     sync: createSyncClient(client),
@@ -569,6 +571,52 @@ export function createSalesClient(client: ApiClient): SalesClient {
       ),
     void: (saleId, body, options = {}) =>
       client.post<Sale>(`/sales/${segment(saleId)}/void`, body, options),
+  };
+}
+
+export type CashSessionStatus = 'open' | 'closed';
+
+/**
+ * Mirrors `CashSessionResponse`. `cashIn`/`cashOut` are live sums from the
+ * payments ledger while `status` is `open`, frozen at close afterwards;
+ * `expectedCash` is only set once closed.
+ */
+export type CashSession = {
+  id: string;
+  storeId: string;
+  openedBy: string;
+  openedByName: string;
+  openedAt: string;
+  closedAt?: string | null;
+  closedBy?: string | null;
+  closedByName?: string | null;
+  status: CashSessionStatus;
+  openingCash: string;
+  countedCash?: string | null;
+  expectedCash?: string | null;
+  difference?: string | null;
+  closingNote?: string | null;
+  cashIn: string;
+  cashOut: string;
+};
+
+export type CashSessionsClient = {
+  open(body: { openingCash: string }, options?: RequestOptions): Promise<ApiResponse<CashSession>>;
+  current(options?: RequestOptions): Promise<ApiResponse<CashSession | null>>;
+  close(sessionId: string, body: { countedCash: string; note?: string }, options?: RequestOptions): Promise<ApiResponse<CashSession>>;
+  list(offset?: number, options?: RequestOptions): Promise<Page<CashSession>>;
+};
+
+export function createCashSessionsClient(client: ApiClient): CashSessionsClient {
+  return {
+    open: (body, options = {}) => client.post<CashSession>('/cash-sessions', body, options),
+    current: (options = {}) => client.get<CashSession | null>('/cash-sessions/current', options),
+    close: (sessionId, body, options = {}) =>
+      client.post<CashSession>(`/cash-sessions/${segment(sessionId)}/close`, body, options),
+    // Offset paging, not cursors: the backend lists sessions with limit/offset,
+    // unlike the cursor-paginated catalogue endpoints `client.list` serves.
+    list: async (offset = 0, options = {}) =>
+      (await client.get<Page<CashSession>>('/cash-sessions', { ...options, query: { ...options.query, limit: 25, offset } })).data,
   };
 }
 

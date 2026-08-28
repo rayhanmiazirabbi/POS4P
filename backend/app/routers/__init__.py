@@ -4,6 +4,7 @@ from app.routers.ai import router as ai_router
 from app.routers.audit import router as audit_router
 from app.routers.auth import router as auth_router
 from app.routers.billing import router as billing_router
+from app.routers.cash import router as cash_router
 from app.routers.catalog import router as catalog_router
 from app.routers.customers import router as customers_router
 from app.routers.ecommerce import router as ecommerce_router
@@ -30,6 +31,7 @@ __all__ = [
     "audit_router",
     "auth_router",
     "billing_router",
+    "cash_router",
     "prescriptions_router",
     "orders_router",
     "ecommerce_router",

@@ -58,6 +58,7 @@ export type { FetchLike, FetchTransportConfig } from './transport';
 
 export {
   createAuthClient,
+  createCashSessionsClient,
   createCatalogClient,
   createCustomersClient,
   createEcommerceClient,
@@ -83,6 +84,9 @@ export type {
   AdoptPayload,
   AdoptResult,
   AuthClient,
+  CashSession,
+  CashSessionsClient,
+  CashSessionStatus,
   AuthSession,
   CurrentOrganization,
   CurrentUser,

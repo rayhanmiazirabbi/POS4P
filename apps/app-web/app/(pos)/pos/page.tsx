@@ -37,6 +37,7 @@ import { IntakeDrawer } from '@/components/intake-drawer';
 import { MedicineFinder, type MedicineSelection } from '@/components/medicine-finder';
 import { ReceiptDialog } from '@/components/receipt-dialog';
 import { SalesHistoryDialog } from '@/components/sales-history-dialog';
+import { ShiftPanel } from '@/components/shift-panel';
 import { amountDueNow, calculateCheckout } from '@/lib/checkout';
 import { decimalEntry } from '@/lib/numeric-input';
 import { flushQueue, forgetSale, queueSale, queueStatus, recoverOutbox, type SaleQueueStatus } from '@/lib/offlineQueue';
@@ -233,6 +234,8 @@ export default function PosPage(): ReactNode {
       if (result.uploaded + result.duplicates > 0) {
         refetchShelf();
         void queryClient.invalidateQueries({ queryKey: ['inventory'] });
+        // Queued sales that carried cash change what the drawer should hold.
+        void queryClient.invalidateQueries({ queryKey: ['pos', 'cash-session'] });
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Upload failed');
@@ -473,6 +476,7 @@ export default function PosPage(): ReactNode {
         clearCart();
         refetchShelf();
         void queryClient.invalidateQueries({ queryKey: ['inventory'] });
+        void queryClient.invalidateQueries({ queryKey: ['pos', 'cash-session'] });
       } else {
         throw { code: 'NETWORK_ERROR' };
       }
@@ -734,6 +738,7 @@ export default function PosPage(): ReactNode {
         {error !== null && <p role="alert" style={{ margin: 0, color: error.startsWith('Offline') ? colors.warning : colors.danger }}>{error}</p>}
         {receipt !== null && <ReceiptDialog printable={receipt} onClose={() => setReceipt(null)} />}
       </section>
+      <ShiftPanel onError={setError} />
       <section className="surface held-carts" aria-labelledby="held-carts-title">
         <header className="held-header"><div><span className="eyebrow">Suspended sales</span><h2 id="held-carts-title">Held carts <span>{heldCarts.length}</span></h2></div><kbd>F8</kbd></header>
         {heldCarts.length === 0 ? <p className="empty-copy">Held carts will stack here until you resume or remove them.</p> : <ul className="held-list">
@@ -795,6 +800,7 @@ export default function PosPage(): ReactNode {
         onStockChanged={() => {
           refetchShelf();
           void queryClient.invalidateQueries({ queryKey: ['inventory'] });
+          void queryClient.invalidateQueries({ queryKey: ['pos', 'cash-session'] });
         }}
       />
     )}
