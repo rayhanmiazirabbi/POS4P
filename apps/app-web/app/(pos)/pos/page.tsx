@@ -36,6 +36,7 @@ import { CustomerCombobox } from '@/components/customer-combobox';
 import { IntakeDrawer } from '@/components/intake-drawer';
 import { MedicineFinder, type MedicineSelection } from '@/components/medicine-finder';
 import { ReceiptDialog } from '@/components/receipt-dialog';
+import { SalesHistoryDialog } from '@/components/sales-history-dialog';
 import { amountDueNow, calculateCheckout } from '@/lib/checkout';
 import { decimalEntry } from '@/lib/numeric-input';
 import { flushQueue, forgetSale, queueSale, queueStatus, recoverOutbox, type SaleQueueStatus } from '@/lib/offlineQueue';
@@ -104,6 +105,7 @@ export default function PosPage(): ReactNode {
   const digitalInputRef = useRef<HTMLInputElement>(null);
   const heldRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [confirmAction, setConfirmAction] = useState<{ kind: 'clear' } | { kind: 'delete'; id: string; label: string } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   useEffect(() => {
     if (draftStatus !== 'ready') return;
@@ -559,6 +561,8 @@ export default function PosPage(): ReactNode {
         document.querySelector<HTMLInputElement>('[aria-label="Search medicines"]')?.focus();
       } else if (event.key === 'F4') {
         event.preventDefault(); holdCurrentCart();
+      } else if (event.key === 'F6') {
+        event.preventDefault(); setHistoryOpen(true);
       } else if (event.key === 'F8') {
         event.preventDefault();
         if (heldRefs.current[0]) heldRefs.current[0].focus(); else setError('There are no held carts.');
@@ -582,7 +586,13 @@ export default function PosPage(): ReactNode {
     <>
     <main className="split-grid split-grid--counter">
       <section className="surface pos-shelf">
-        <header className="pos-section-header"><div><span className="eyebrow">New sale</span><h1>Find medicine</h1></div><span className="keyboard-hint">/ Search</span></header>
+        <header className="pos-section-header">
+          <div><span className="eyebrow">New sale</span><h1>Find medicine</h1></div>
+          <span style={{ display: 'flex', alignItems: 'center', gap: spacing.xs }}>
+            <span className="keyboard-hint">/ Search</span>
+            <button type="button" className="quiet-action" onClick={() => setHistoryOpen(true)}>Returns / void <kbd>F6</kbd></button>
+          </span>
+        </header>
         {/* Said before the first click, not after the sale. A cashier quoting from a
             three-day-old price list should know that is what they are reading. */}
         {stale !== null && <p role="status" className="status-message status-message--warning">{stale}</p>}
@@ -778,6 +788,16 @@ export default function PosPage(): ReactNode {
         <footer><button type="button" className="quiet-action" onClick={() => setApprovalOpen(false)}>Cancel</button><button type="button" className="primary-action" disabled={busy} onClick={() => void approveAndCheckout()}>{busy ? 'Checking…' : 'Approve and complete sale'}</button></footer>
       </div>
     </div>}
+    {historyOpen && user !== null && (
+      <SalesHistoryDialog
+        role={user.role}
+        onClose={() => setHistoryOpen(false)}
+        onStockChanged={() => {
+          refetchShelf();
+          void queryClient.invalidateQueries({ queryKey: ['inventory'] });
+        }}
+      />
+    )}
     </>
   );
 }

@@ -221,6 +221,7 @@ export type {
   SaleItem,
   SaleListFilters,
   SalePaymentInput,
+  SaleReturn,
   SaleReturnRequest,
   SalesClient,
   SaleStatus,

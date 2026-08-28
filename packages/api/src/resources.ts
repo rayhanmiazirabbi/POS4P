@@ -535,6 +535,9 @@ export type DiscountApproval = { token: string; expiresAt: string; approvedBy: s
 
 export type SaleReturnRequest = { reason: string; lines: readonly { saleItemId: string; quantity: string }[] };
 
+/** `total` is negative on the wire: it is a credit against the sale. */
+export type SaleReturn = { id: string; saleId: string; reason: string; total: string; advanceRestored: string; createdAt: string };
+
 export type SaleListFilters = { customerId?: string; status?: SaleStatus };
 
 export type SalesClient = {
@@ -544,7 +547,7 @@ export type SalesClient = {
   create(body: SaleCreateRequest, options?: RequestOptions): Promise<ApiResponse<Sale>>;
   approveDiscount(body: DiscountApprovalRequest, options?: RequestOptions): Promise<ApiResponse<DiscountApproval>>;
   /** Requires an idempotency key (send one via `options.idempotencyKey`). */
-  createReturn(saleId: string, body: SaleReturnRequest, options?: RequestOptions): Promise<ApiResponse<{ id: string; saleId: string; reason: string; total: string; createdAt: string }>>;
+  createReturn(saleId: string, body: SaleReturnRequest, options?: RequestOptions): Promise<ApiResponse<SaleReturn>>;
   void(saleId: string, body: { reason: string }, options?: RequestOptions): Promise<ApiResponse<Sale>>;
 };
 
@@ -559,7 +562,7 @@ export function createSalesClient(client: ApiClient): SalesClient {
     create: (body, options = {}) => client.post<Sale>('/sales', body, options),
     approveDiscount: (body, options = {}) => client.post<DiscountApproval>('/sales/discount-approvals', body, options),
     createReturn: (saleId, body, options = {}) =>
-      client.post<{ id: string; saleId: string; reason: string; total: string; createdAt: string }>(
+      client.post<SaleReturn>(
         `/sales/${segment(saleId)}/returns`,
         body,
         options,
