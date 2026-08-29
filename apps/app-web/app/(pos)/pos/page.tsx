@@ -52,6 +52,9 @@ const button: CSSProperties = { padding: `${spacing.sm} ${spacing.lg}`, borderRa
 
 const emptyQueue: SaleQueueStatus = { pending: 0, retrying: 0, stuck: [], nextRetryAt: null };
 
+/** Held-cart tab backgrounds, cycled so every open tab reads distinct at a glance. */
+const heldTabColors = ['#fdeccb', '#d4e7fa', '#e4dcf9', '#d2f0de', '#f9d9e6', '#e9e7d4'];
+
 export default function PosPage(): ReactNode {
   const { user } = useSession();
   const queryClient = useQueryClient();
@@ -846,27 +849,40 @@ export default function PosPage(): ReactNode {
         {error !== null && <p role="alert" style={{ margin: 0, color: error.startsWith('Offline') ? colors.warning : colors.danger }}>{error}</p>}
         {receipt !== null && <ReceiptDialog printable={receipt} onClose={() => setReceipt(null)} />}
       </section>
-      <ShiftPanel onError={setError} />
-      <section className="surface held-carts" aria-labelledby="held-carts-title">
-        <header className="held-header"><div><span className="eyebrow">Suspended sales</span><h2 id="held-carts-title">Held carts <span>{heldCarts.length}</span></h2></div><kbd>F8</kbd></header>
-        {heldCarts.length === 0 ? <p className="empty-copy">Held carts will stack here until you resume or remove them.</p> : <ul className="held-list">
-          {heldCarts.map((held, index) => {
-            const quantity = held.draft.lines.reduce((sum, line) => sum + line.quantity, 0);
-            const total = held.draft.lines.reduce((sum, line) => sum + Number(line.unitPrice) * line.quantity, 0).toFixed(2);
-            return <li key={held.id}>
-              <button ref={(node) => { heldRefs.current[index] = node; }} type="button" className="held-main" onClick={() => resumeCart(held.id)} onKeyDown={(event) => {
-                if (event.key === 'ArrowDown') { event.preventDefault(); heldRefs.current[(index + 1) % heldCarts.length]?.focus(); }
-                else if (event.key === 'ArrowUp') { event.preventDefault(); heldRefs.current[(index - 1 + heldCarts.length) % heldCarts.length]?.focus(); }
-              }}>
-                <span><strong>{held.label}</strong><small>{quantity} item{quantity === 1 ? '' : 's'} · {new Date(held.heldAt).toLocaleString()}</small></span><b>৳{total}</b>
-              </button>
-              <button type="button" className="line-remove" aria-label={`Delete held cart ${held.label}`} onClick={() => setConfirmAction({ kind: 'delete', id: held.id, label: held.label })}>×</button>
-            </li>;
-          })}
-        </ul>}
-      </section>
       </aside>
     </main>
+    <nav className="held-tabstrip" aria-label="Held carts">
+      <div className="held-strip-label">
+        <PosIcon name="pause" />
+        <strong>Held</strong>
+        <span className="held-strip-count">{heldCarts.length}</span>
+        <kbd>F8</kbd>
+      </div>
+      {heldCarts.length === 0 ? <p className="held-strip-empty">Held carts stack here as tabs — hold the current sale with <kbd>F4</kbd>.</p> : <ul className="held-tabs">
+        {heldCarts.map((held, index) => {
+          const quantity = held.draft.lines.reduce((sum, line) => sum + line.quantity, 0);
+          const total = held.draft.lines.reduce((sum, line) => sum + Number(line.unitPrice) * line.quantity, 0).toFixed(2);
+          return <li key={held.id} className="held-tab" style={{ background: heldTabColors[index % heldTabColors.length] }} onClick={() => resumeCart(held.id)}>
+            <button ref={(node) => { heldRefs.current[index] = node; }} type="button" className="held-main" onKeyDown={(event) => {
+              if (event.key === 'ArrowDown') { event.preventDefault(); heldRefs.current[(index + 1) % heldCarts.length]?.focus(); }
+              else if (event.key === 'ArrowUp') { event.preventDefault(); heldRefs.current[(index - 1 + heldCarts.length) % heldCarts.length]?.focus(); }
+            }}>
+              <span><strong>{held.label}</strong><small>{quantity} item{quantity === 1 ? '' : 's'} · ৳{total}</small></span>
+            </button>
+            <button type="button" className="line-remove" aria-label={`Delete held cart ${held.label}`} onClick={(event) => { event.stopPropagation(); setConfirmAction({ kind: 'delete', id: held.id, label: held.label }); }}>×</button>
+            {/* Hover preview, like a browser tab card: what is inside before resuming it. */}
+            <div className="held-tab-preview" aria-hidden="true">
+              <strong>{held.label}</strong>
+              <ul>
+                {held.draft.lines.map((line) => <li key={line.storeProductId}><span>{line.name}</span><span>×{line.quantity}</span></li>)}
+              </ul>
+              <small>Held {new Date(held.heldAt).toLocaleTimeString()}</small>
+            </div>
+          </li>;
+        })}
+      </ul>}
+      <ShiftPanel onError={setError} />
+    </nav>
     {confirmAction && <ConfirmDialog
       title={confirmAction.kind === 'clear' ? 'Clear active cart?' : 'Remove held cart?'}
       message={confirmAction.kind === 'clear' ? 'This removes the active sale draft from this terminal. Held carts are not affected.' : `“${confirmAction.label}” will be removed from this terminal.`}

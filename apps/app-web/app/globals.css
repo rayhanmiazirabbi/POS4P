@@ -211,8 +211,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .inventory-stock table th, .purchasing-page table th { color: var(--pos-muted); font-size: 11px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
 .purchasing-page { grid-template-columns: minmax(0, 1.28fr) minmax(370px, .72fr); }
 
-.pos-shelf { display: flex; flex-direction: column; gap: 10px; min-height: calc(100vh - 96px); padding: 14px; }
-.pos-section-header, .cart-header, .held-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pos-shelf { display: flex; flex-direction: column; gap: 10px; min-height: calc(100vh - 150px); padding: 14px; }
+/* The held-cart tab strip is fixed to the viewport bottom, so the counter grid
+   pays for it out of its own padding instead of hiding its last rows. */
+.split-grid--counter { padding-bottom: 86px; }
+.pos-section-header, .cart-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .pos-section-header { padding-bottom: 10px; border-bottom: 1px solid var(--pos-line); }
 .pos-section-header h1 { margin: 2px 0 0; font-size: 18px; letter-spacing: -.025em; }
 .pos-rail { display: grid; gap: 12px; min-width: 0; }
@@ -221,8 +224,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .cart-title { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .cart-title-icon { display: grid; place-items: center; flex: 0 0 auto; width: 40px; height: 40px; color: var(--pos-ink); background: var(--pos-accent-soft); border-radius: 10px; }
 .pos-icon { display: inline-block; flex: 0 0 auto; width: 18px; height: 18px; stroke-width: 1.8; }
-.cart-header h2, .held-header h2 { margin: 0; font-size: 18px; letter-spacing: -.025em; }
-.cart-header h2 span, .held-header h2 span { color: var(--pos-muted); font-weight: 500; }
+.cart-header h2 { margin: 0; font-size: 18px; letter-spacing: -.025em; }
+.cart-header h2 span { color: var(--pos-muted); font-weight: 500; }
 .cart-header small { display: block; margin-top: 2px; color: var(--pos-muted); font-size: 12px; }
 .cart-header-actions { display: flex; gap: 7px; }
 .cart-header-actions .quiet-action { gap: 6px; min-height: 38px; padding: 6px 10px; font-size: 12px; }
@@ -329,18 +332,36 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .complete-sale { position: relative; justify-content: center; width: 100%; min-height: 48px; padding-inline: 54px; font-size: 14px; }
 .complete-sale kbd { position: absolute; right: 12px; }
 .complete-sale kbd { color: rgba(255,255,255,.92); background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.22); }
-.held-carts { padding: 13px 14px; }
-.held-header { padding-bottom: 9px; border-bottom: 1px solid var(--pos-line); }
-.held-list { display: grid; list-style: none; margin: 0; padding: 0; }
-.held-list li { display: grid; grid-template-columns: 1fr 32px; align-items: center; border-bottom: 1px solid var(--pos-line); }
-.held-list li:last-child { border-bottom: 0; }
-.held-main { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 9px 3px; color: var(--pos-ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
-.held-main:hover, .held-main:focus-visible { color: var(--pos-accent); }
-.held-main > span { display: grid; min-width: 0; gap: 3px; }
+.held-tabstrip { position: fixed; z-index: 45; bottom: 0; left: 0; right: 0; display: flex; align-items: flex-end; gap: 16px; padding: 0 20px 6px 16px; background: rgba(255,255,255,.96); border-top: 1px solid var(--pos-line); box-shadow: 0 -8px 26px rgba(26,52,39,.06); backdrop-filter: blur(12px); }
+.held-strip-label { display: flex; flex: 0 0 auto; align-self: center; align-items: center; gap: 7px; color: var(--pos-muted); font-size: 11px; font-weight: 750; }
+.held-strip-label .pos-icon { width: 15px; height: 15px; }
+.held-strip-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px; color: #fff; background: var(--pos-accent); border-radius: 9px; font-size: 10px; }
+.held-strip-empty { align-self: center; margin: 0; color: var(--pos-muted); font-size: 11px; }
+.held-tabs { display: flex; flex: 1; align-items: flex-end; gap: 5px; margin: 0; padding: 0; list-style: none; min-width: 0; }
+/* Tabs shrink as more carts are held -- the strip never scrolls, so a tab's hover
+   preview can rise above it without being clipped. */
+.held-tab { position: relative; display: flex; flex: 0 1 auto; align-items: center; gap: 2px; min-width: 64px; max-width: 230px; margin-top: -7px; padding: 4px 6px 5px 13px; border: 1px solid rgba(23,33,28,.14); border-bottom: 0; border-radius: 11px 11px 0 0; box-shadow: 0 -3px 10px rgba(26,52,39,.05); cursor: pointer; }
+.held-main { display: flex; min-width: 0; padding: 2px; color: var(--pos-ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
+.held-main > span { display: grid; min-width: 0; gap: 1px; }
 .held-main strong, .held-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.held-main strong { font-size: 13px; }
-.held-main small { color: var(--pos-muted); font-size: 11px; }
-.held-main b { flex: 0 0 auto; font-size: 13px; }
+.held-main strong { font-size: 12px; }
+.held-main small { color: var(--pos-muted); font-size: 10px; }
+.held-main:hover strong, .held-main:focus-visible strong { text-decoration: underline; }
+.held-tab .line-remove { width: 20px; height: 20px; border-radius: 50%; font-size: 14px; }
+.held-tab .line-remove:hover { color: var(--pos-danger); background: rgba(23,33,28,.09); }
+.held-tab-preview { position: absolute; bottom: calc(100% + 9px); left: 0; z-index: 60; display: grid; gap: 6px; width: 250px; max-width: calc(100vw - 32px); padding: 10px 12px; text-align: left; background: #fff; border: 1px solid var(--pos-line-strong); border-radius: 10px; box-shadow: var(--pos-shadow); opacity: 0; visibility: hidden; transform: translateY(5px); pointer-events: none; transition: opacity .12s ease, transform .12s ease, visibility .12s; }
+.held-tab:hover .held-tab-preview, .held-tab:focus-within .held-tab-preview { opacity: 1; visibility: visible; transform: translateY(0); transition-delay: .45s; }
+.held-tab-preview > strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.held-tab-preview ul { display: grid; gap: 3px; max-height: 138px; margin: 0; padding: 0; overflow: hidden; list-style: none; }
+.held-tab-preview li { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 11px; }
+.held-tab-preview li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.held-tab-preview li span:last-child { flex: 0 0 auto; color: var(--pos-muted); }
+.held-tab-preview > small { color: var(--pos-muted); font-size: 10px; }
+.cash-drawer-toggle { display: flex; flex: 0 0 auto; align-self: center; align-items: center; gap: 7px; min-height: 32px; margin-left: auto; padding: 5px 12px; color: var(--pos-ink); background: var(--pos-soft); border: 1px solid var(--pos-line-strong); border-radius: 8px; cursor: pointer; font-size: 11px; font-weight: 700; white-space: nowrap; transition: color .14s ease, border-color .14s ease; }
+.cash-drawer-toggle:hover { color: var(--pos-accent); border-color: var(--pos-accent); }
+.cash-drawer-dot { flex: 0 0 auto; width: 8px; height: 8px; background: var(--pos-line-strong); border-radius: 50%; }
+.cash-drawer-toggle--open .cash-drawer-dot { background: var(--pos-accent); box-shadow: 0 0 0 3px rgba(7,138,77,.15); }
+.cash-drawer-toggle small { color: var(--pos-muted); font-weight: 650; }
 
 @keyframes drawer-in { from { opacity: .5; transform: translateX(28px); } }
 @keyframes backdrop-in { from { opacity: 0; } }

@@ -4,9 +4,20 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { CashSession } from '@pharmacy/api';
 import { colors, spacing, tokens } from '@pharmacy/design-tokens';
 import { useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 import { pharmacyApi } from '@/lib/api';
 import { decimalEntry } from '@/lib/numeric-input';
+
+/**
+ * The tab strip carries `backdrop-filter`, which makes it the containing block
+ * for fixed-position descendants -- a dialog rendered inside it would fix to the
+ * strip, not the viewport. Dialogs go through a portal to `document.body` so
+ * they center on the page no matter where their trigger lives.
+ */
+function dialogLayer(node: ReactNode): ReactNode {
+  return typeof document === 'undefined' ? node : createPortal(node, document.body);
+}
 
 /**
  * The till's shift: who opened the drawer, when, and what the ledger says is in it.
@@ -19,6 +30,7 @@ import { decimalEntry } from '@/lib/numeric-input';
  */
 export function ShiftPanel({ onError }: { onError: (message: string | null) => void }): ReactNode {
   const queryClient = useQueryClient();
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [dialog, setDialog] = useState<'open' | 'close' | null>(null);
   const offline = typeof navigator !== 'undefined' && !navigator.onLine;
 
@@ -33,38 +45,57 @@ export function ShiftPanel({ onError }: { onError: (message: string | null) => v
   }
 
   const session = sessionQuery.data ?? null;
+  const expected = session === null ? null : (Number(session.openingCash) + Number(session.cashIn) - Number(session.cashOut)).toFixed(2);
 
   return (
-    <section className="surface held-carts" aria-labelledby="shift-title">
-      <header className="held-header">
-        <div>
-          <span className="eyebrow">Cash drawer</span>
-          <h2 id="shift-title">{session === null ? 'Shift closed' : 'Shift open'}</h2>
+    <>
+      <button
+        type="button"
+        className={`cash-drawer-toggle${session !== null ? ' cash-drawer-toggle--open' : ''}`}
+        onClick={() => setDetailsOpen(true)}
+      >
+        <span className="cash-drawer-dot" aria-hidden="true" />
+        Cash drawer
+        {expected !== null && <small>৳{expected}</small>}
+      </button>
+      {detailsOpen && dialogLayer(
+        <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setDetailsOpen(false); }}>
+          <section className="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="shift-title" onKeyDown={(event) => { if (event.key === 'Escape') setDetailsOpen(false); }}>
+            <header className="dialog-header">
+              <div>
+                <span className="eyebrow">Cash drawer</span>
+                <h2 id="shift-title">{session === null ? 'Shift closed' : 'Shift open'}</h2>
+              </div>
+              <button type="button" className="icon-action" onClick={() => setDetailsOpen(false)} aria-label="Close cash drawer details">×</button>
+            </header>
+            <div style={{ display: 'grid', gap: spacing.md, paddingTop: spacing.md }}>
+              {sessionQuery.isLoading && <p className="status-message status-message--muted">Checking the drawer…</p>}
+              {sessionQuery.isError && (
+                <p role="alert" className="status-message status-message--error">
+                  Could not reach the server for the shift. {offline ? 'Offline.' : 'Retry in a moment.'}
+                </p>
+              )}
+              {session === null && !sessionQuery.isLoading && !sessionQuery.isError && (
+                <>
+                  <p className="empty-copy">Open the drawer with its starting cash to start the shift.</p>
+                  <button type="button" className="primary-action" disabled={offline} onClick={() => setDialog('open')}>
+                    Open shift
+                  </button>
+                </>
+              )}
+              {session !== null && (
+                <>
+                  <ShiftFigures session={session} />
+                  <button type="button" className="quiet-action" disabled={offline} onClick={() => setDialog('close')}>
+                    Close shift and count the drawer
+                  </button>
+                </>
+              )}
+            </div>
+          </section>
         </div>
-      </header>
-      {sessionQuery.isLoading && <p className="status-message status-message--muted">Checking the drawer…</p>}
-      {sessionQuery.isError && (
-        <p role="alert" className="status-message status-message--error">
-          Could not reach the server for the shift. {offline ? 'Offline.' : 'Retry in a moment.'}
-        </p>
       )}
-      {session === null && !sessionQuery.isLoading && !sessionQuery.isError && (
-        <>
-          <p className="empty-copy">Open the drawer with its starting cash to start the shift.</p>
-          <button type="button" className="primary-action" disabled={offline} onClick={() => setDialog('open')}>
-            Open shift
-          </button>
-        </>
-      )}
-      {session !== null && (
-        <>
-          <ShiftFigures session={session} />
-          <button type="button" className="quiet-action" disabled={offline} onClick={() => setDialog('close')}>
-            Close shift and count the drawer
-          </button>
-        </>
-      )}
-      {dialog === 'open' && (
+      {dialog === 'open' && dialogLayer(
         <OpenShiftDialog
           busy={sessionQuery.isFetching}
           onClose={() => setDialog(null)}
@@ -72,7 +103,7 @@ export function ShiftPanel({ onError }: { onError: (message: string | null) => v
           onError={onError}
         />
       )}
-      {dialog === 'close' && session !== null && (
+      {dialog === 'close' && session !== null && dialogLayer(
         <CloseShiftDialog
           session={session}
           onClose={() => setDialog(null)}
@@ -80,7 +111,7 @@ export function ShiftPanel({ onError }: { onError: (message: string | null) => v
           onError={onError}
         />
       )}
-    </section>
+    </>
   );
 }
 
