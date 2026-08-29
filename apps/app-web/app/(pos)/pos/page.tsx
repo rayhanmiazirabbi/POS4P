@@ -702,8 +702,10 @@ export default function PosPage(): ReactNode {
             <div><h2>Cart <span>({cart.length} {cart.length === 1 ? 'item' : 'items'})</span></h2><small>Saved automatically on this terminal</small></div>
           </div>
           <div className="cart-header-actions">
-            <button type="button" className="quiet-action" disabled={!draftHasItems(draft)} onClick={holdCurrentCart}><PosIcon name="pause" /> <span>Hold</span> <kbd>F4</kbd></button>
-            <button type="button" className="quiet-action danger-action" disabled={!draftHasItems(draft)} onClick={() => setConfirmAction({ kind: 'clear' })}><PosIcon name="trash" /> <span>Clear</span></button>
+            {/* Off the Tab chain: F4 holds, and the chain must run search →
+                quantity → discount without detouring through header buttons. */}
+            <button type="button" tabIndex={-1} className="quiet-action" disabled={!draftHasItems(draft)} onClick={holdCurrentCart}><PosIcon name="pause" /> <span>Hold</span> <kbd>F4</kbd></button>
+            <button type="button" tabIndex={-1} className="quiet-action danger-action" disabled={!draftHasItems(draft)} onClick={() => setConfirmAction({ kind: 'clear' })}><PosIcon name="trash" /> <span>Clear</span></button>
           </div>
         </header>
         {draftNotice && <p role="status" aria-live="polite" className="status-message cart-notice"><span aria-hidden="true"><PosIcon name="check" /></span>{draftNotice}</p>}
@@ -713,18 +715,31 @@ export default function PosPage(): ReactNode {
               <span className="line-number" aria-hidden="true">{index + 1}</span>
               <span className="line-details"><strong>{line.name}</strong><small className={line.unavailable ? 'line-unavailable' : ''}>{line.unavailable ? 'Unavailable — remove' : `৳${line.unitPrice} / ${line.unit}`}</small></span>
               <div className="quantity-stepper" aria-label={`Quantity for ${line.name}`}>
-                <button type="button" aria-label={`Decrease ${line.name} quantity`} disabled={line.quantity <= 1} onClick={() => setQuantity(line.storeProductId, String(line.quantity - 1))}>−</button>
-                <input type="number" min={1} value={line.quantity} onChange={(event) => setQuantity(line.storeProductId, event.target.value)} aria-label={`Quantity for ${line.name}`} />
-                <button type="button" aria-label={`Increase ${line.name} quantity`} onClick={() => setQuantity(line.storeProductId, String(line.quantity + 1))}>+</button>
+                <button type="button" tabIndex={-1} aria-label={`Decrease ${line.name} quantity`} disabled={line.quantity <= 1} onClick={() => setQuantity(line.storeProductId, String(line.quantity - 1))}>−</button>
+                <input
+                  type="number"
+                  min={1}
+                  value={line.quantity}
+                  onChange={(event) => setQuantity(line.storeProductId, event.target.value)}
+                  onKeyDown={(event) => {
+                    // Arrows step the quantity here instead of moving the caret, so
+                    // the Tab chain is the only thing that leaves this field. The
+                    // floor is 1: a stray ArrowDown must not drop the line.
+                    if (event.key === 'ArrowUp') { event.preventDefault(); setQuantity(line.storeProductId, String(line.quantity + 1)); }
+                    else if (event.key === 'ArrowDown' && line.quantity > 1) { event.preventDefault(); setQuantity(line.storeProductId, String(line.quantity - 1)); }
+                  }}
+                  aria-label={`Quantity for ${line.name}`}
+                />
+                <button type="button" tabIndex={-1} aria-label={`Increase ${line.name} quantity`} onClick={() => setQuantity(line.storeProductId, String(line.quantity + 1))}>+</button>
               </div>
               <div className="line-discount-control">
-                <select aria-label={`Discount type for ${line.name}`} value={line.discountMode} onChange={(event) => setLineDiscount(line.storeProductId, { discountMode: event.target.value as DiscountInput['mode'] })}>
+                <select tabIndex={-1} aria-label={`Discount type for ${line.name}`} value={line.discountMode} onChange={(event) => setLineDiscount(line.storeProductId, { discountMode: event.target.value as DiscountInput['mode'] })}>
                   <option value="percentage">% off</option><option value="flat">৳ off</option>
                 </select>
                 <input aria-label={`Discount for ${line.name}`} inputMode="decimal" placeholder="0" value={line.discountValue} onChange={(event) => setLineDiscount(line.storeProductId, { discountValue: decimalEntry(event.target.value) })} />
               </div>
               <strong className="line-total">৳{pricing.data.lines[index]?.net ?? lineTotal(line).amount}</strong>
-              <button type="button" className="line-remove" aria-label={`Remove ${line.name}`} onClick={() => setCart((current) => current.filter((entry) => entry.storeProductId !== line.storeProductId))}>×</button>
+              <button type="button" tabIndex={-1} className="line-remove" aria-label={`Remove ${line.name}`} onClick={() => setCart((current) => current.filter((entry) => entry.storeProductId !== line.storeProductId))}>×</button>
             </li>
           ))}
           {cart.length === 0 && <li className="cart-empty"><span aria-hidden="true">🛒</span><strong>No items in cart</strong><small>Search and add products to start a sale.</small></li>}
@@ -736,16 +751,16 @@ export default function PosPage(): ReactNode {
           <div className="summary-row summary-row--editable">
             <label htmlFor="global-discount-mode">Discount</label>
             <div className="summary-discount-fields">
-              <select id="global-discount-mode" className="field" value={globalDiscountMode} onChange={(event) => setDraftField('globalDiscountMode', event.target.value as DiscountInput['mode'])}><option value="percentage">Percentage</option><option value="flat">Flat amount</option></select>
+              <select tabIndex={-1} id="global-discount-mode" className="field" value={globalDiscountMode} onChange={(event) => setDraftField('globalDiscountMode', event.target.value as DiscountInput['mode'])}><option value="percentage">Percentage</option><option value="flat">Flat amount</option></select>
               <input className="field" aria-label="Global discount value" inputMode="decimal" placeholder="0" value={globalDiscountValue} onChange={(event) => setDraftField('globalDiscountValue', decimalEntry(event.target.value))} />
             </div>
             <strong className="discount-value">−৳{pricing.data.globalDiscount}</strong>
           </div>
           <div className="summary-charges">
-            <label><span>Delivery charge</span><span className="money-input"><span>৳</span><input aria-label="Delivery charge" inputMode="decimal" placeholder="0.00" value={deliveryCharge} onChange={(event) => setDraftField('deliveryCharge', decimalEntry(event.target.value))} /></span></label>
-            <label><span>Other fee</span><span className="money-input"><span>৳</span><input aria-label="Other fee" inputMode="decimal" placeholder="0.00" value={otherFee} onChange={(event) => setDraftField('otherFee', decimalEntry(event.target.value))} /></span></label>
+            <label><span>Delivery charge</span><span className="money-input"><span>৳</span><input tabIndex={-1} aria-label="Delivery charge" inputMode="decimal" placeholder="0.00" value={deliveryCharge} onChange={(event) => setDraftField('deliveryCharge', decimalEntry(event.target.value))} /></span></label>
+            <label><span>Other fee</span><span className="money-input"><span>৳</span><input tabIndex={-1} aria-label="Other fee" inputMode="decimal" placeholder="0.00" value={otherFee} onChange={(event) => setDraftField('otherFee', decimalEntry(event.target.value))} /></span></label>
           </div>
-          {otherFee.trim() !== '' && Number(otherFee) > 0 && <input className="field other-fee-label" aria-label="Other fee label" placeholder="Describe other fee" value={otherFeeLabel} onChange={(event) => setDraftField('otherFeeLabel', event.target.value)} />}
+          {otherFee.trim() !== '' && Number(otherFee) > 0 && <input tabIndex={-1} className="field other-fee-label" aria-label="Other fee label" placeholder="Describe other fee" value={otherFeeLabel} onChange={(event) => setDraftField('otherFeeLabel', event.target.value)} />}
           <div className="summary-total"><span>Total</span><strong>৳{pricing.data.total}</strong></div>
         </section>
         {pricing.problem && <p role="alert" className="form-error" style={{ margin: 0 }}>{pricing.problem}</p>}
@@ -763,13 +778,14 @@ export default function PosPage(): ReactNode {
         />
 
         {customerId !== null && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.xs }}>
-          <label style={{ fontSize: tokens.typography.sizes.sm }}>Advance applied<input className="field" inputMode="decimal" placeholder="0.00" value={advance} onChange={(event) => setDraftField('advance', decimalEntry(event.target.value))} /></label>
-          <label style={{ fontSize: tokens.typography.sizes.sm }}>Advance reference<input className="field" placeholder="Order or receipt" value={advanceReference} onChange={(event) => setDraftField('advanceReference', event.target.value)} /></label>
+          <label style={{ fontSize: tokens.typography.sizes.sm }}>Advance applied<input tabIndex={-1} className="field" inputMode="decimal" placeholder="0.00" value={advance} onChange={(event) => setDraftField('advance', decimalEntry(event.target.value))} /></label>
+          <label style={{ fontSize: tokens.typography.sizes.sm }}>Advance reference<input tabIndex={-1} className="field" placeholder="Order or receipt" value={advanceReference} onChange={(event) => setDraftField('advanceReference', event.target.value)} /></label>
         </div>}
         {customerId !== null && availablePoints > 0 && pointValue > 0 && (
           <label style={{ fontSize: tokens.typography.sizes.sm, display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
             Redeem points (of {availablePoints} · ৳{pointValue.toFixed(2)}/pt)
             <input
+              tabIndex={-1}
               className="field"
               inputMode="numeric"
               placeholder="0"
@@ -790,7 +806,18 @@ export default function PosPage(): ReactNode {
         <section className="payment-section" aria-label="Payment">
           <label className="payment-field">
             <span>Cash received</span>
-            <span className="payment-input"><PosIcon name="cash" /><input ref={cashInputRef} value={cashReceived} onChange={(event) => setCashReceived(decimalEntry(event.target.value))} placeholder={dueNow.amount} inputMode="decimal" /></span>
+            <span className="payment-input"><PosIcon name="cash" /><input
+              ref={cashInputRef}
+              value={cashReceived}
+              onChange={(event) => setCashReceived(decimalEntry(event.target.value))}
+              onKeyDown={(event) => {
+                // The Tab chain ends here, so Enter is the whole sale: the amount
+                // is already committed on each keystroke, nothing is pending.
+                if (event.key === 'Enter' && !busy) { event.preventDefault(); void checkout(); }
+              }}
+              placeholder={dueNow.amount}
+              inputMode="decimal"
+            /></span>
           </label>
           {digitalMethods.length > 0 && (
             <label className="payment-field">

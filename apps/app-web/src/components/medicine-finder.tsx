@@ -13,6 +13,28 @@ export type MedicineSelection =
   | { kind: 'custom'; name: string };
 type SearchSelection = Exclude<MedicineSelection, { kind: 'custom' }>;
 
+/** Recalled searches live on the terminal, like shell history on a machine. */
+const SEARCH_HISTORY_KEY = 'medicine-search-history';
+const SEARCH_HISTORY_LIMIT = 50;
+
+function loadSearchHistory(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(SEARCH_HISTORY_KEY) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSearchHistory(entries: readonly string[]): void {
+  try {
+    window.localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(entries.slice(0, SEARCH_HISTORY_LIMIT)));
+  } catch {
+    // Private browsing or no quota: this session's recall still works from state.
+  }
+}
+
 export function MedicineFinder({
   products,
   onSelect,
@@ -28,6 +50,11 @@ export function MedicineFinder({
   const [debounced, setDebounced] = useState('');
   const [manualGlobal, setManualGlobal] = useState<boolean | null>(null);
   const [pendingSubmit, setPendingSubmit] = useState(false);
+  // Newest first. `historyIndex === null` means live typing; a number means the
+  // box is showing that entry, and `draft` holds the abandoned text to restore.
+  const [history, setHistory] = useState<string[]>(() => loadSearchHistory());
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const [draft, setDraft] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -59,17 +86,65 @@ export function MedicineFinder({
     const exact = globalRows.find((row) => row.matchQuality === 'exact' && (row.matchedField === 'barcode' || row.matchedField === 'sku'));
     if (exact) {
       setPendingSubmit(false);
+      rememberSearch(debounced);
       onSelect({ kind: 'catalog', item: exact });
       setQuery('');
+      setHistoryIndex(null);
+      inputRef.current?.focus();
       return;
     }
     setPendingSubmit(false);
   }, [debounced, globalQuery.isFetching, globalRows, onSelect, pendingSubmit]);
 
+  /** Only a search that rang something up enters history, like an executed command. */
+  function rememberSearch(term: string): void {
+    const trimmed = term.trim();
+    if (trimmed === '') return;
+    setHistory((current) => {
+      if (current[0] === trimmed) return current;
+      const next = [trimmed, ...current].slice(0, SEARCH_HISTORY_LIMIT);
+      saveSearchHistory(next);
+      return next;
+    });
+  }
+
+  function recallOlder(): void {
+    if (history.length === 0) return;
+    if (historyIndex === null) {
+      setDraft(query);
+      setHistoryIndex(0);
+      setQuery(history[0]!);
+      return;
+    }
+    const older = historyIndex + 1;
+    if (older >= history.length) return; // already the oldest entry
+    setHistoryIndex(older);
+    setQuery(history[older]!);
+  }
+
+  /** Returns true when the press was consumed walking history, so ArrowDown can fall through to the rows otherwise. */
+  function recallNewer(): boolean {
+    if (historyIndex === null) return false;
+    if (historyIndex === 0) {
+      setHistoryIndex(null);
+      setQuery(draft); // past the newest entry: back to what was being typed
+      return true;
+    }
+    const newer = historyIndex - 1;
+    setHistoryIndex(newer);
+    setQuery(history[newer]!);
+    return true;
+  }
+
   function choose(selection: MedicineSelection): void {
     setPendingSubmit(false);
+    rememberSearch(query);
     onSelect(selection);
     setQuery('');
+    setHistoryIndex(null);
+    // Choosing from a focused row unmounts the rows (query clears), which drops
+    // focus to the page body. Park it back in the box so the next scan just types.
+    inputRef.current?.focus();
   }
 
   function submit(): void {
@@ -97,20 +172,28 @@ export function MedicineFinder({
           autoFocus={autoFocus}
           placeholder="Scan barcode or search medicine, generic, strength, or SKU…"
           aria-label="Search medicines"
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => { setQuery(event.target.value); setHistoryIndex(null); }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') { event.preventDefault(); submit(); }
-            else if (event.key === 'Escape') { setPendingSubmit(false); setQuery(''); }
-            else if (event.key === 'ArrowDown' && rows.length > 0) {
+            else if (event.key === 'Escape') { setPendingSubmit(false); setQuery(''); setHistoryIndex(null); }
+            else if (event.key === 'ArrowUp') {
+              // Terminal recall: each press walks one entry older; typing resets it.
               event.preventDefault();
-              rowRefs.current[0]?.focus();
+              recallOlder();
+            } else if (event.key === 'ArrowDown') {
+              if (recallNewer()) { event.preventDefault(); return; }
+              if (rows.length > 0) {
+                event.preventDefault();
+                rowRefs.current[0]?.focus();
+              }
             }
           }}
         />
-        {query !== '' && <button type="button" className="quiet-action" aria-label="Clear search" onClick={() => setQuery('')}>Clear</button>}
+        {query !== '' && <button type="button" tabIndex={-1} className="quiet-action" aria-label="Clear search" onClick={() => setQuery('')}>Clear</button>}
       </div>
       <label className="global-toggle">
         <input
+          tabIndex={-1}
           type="checkbox"
           checked={globalEnabled}
           onChange={(event) => setManualGlobal(event.target.checked)}
@@ -134,6 +217,7 @@ export function MedicineFinder({
                 ref={(node) => { rowRefs.current[index] = node; }}
                 type="button"
                 role="option"
+                tabIndex={-1}
                 className="medicine-result"
                 onClick={() => choose(selection)}
                 onKeyDown={(event) => {
@@ -151,7 +235,7 @@ export function MedicineFinder({
           })}
           {globalQuery.isFetching && <p className="finder-note" role="status">Searching the global catalogue…</p>}
           {!globalQuery.isFetching && rows.length === 0 && globalEnabled && debounced !== '' && (
-            <button type="button" className="create-local" onClick={() => choose({ kind: 'custom', name: query.trim() })}>
+            <button type="button" tabIndex={-1} className="create-local" onClick={() => choose({ kind: 'custom', name: query.trim() })}>
               <strong>Create “{query.trim()}” for this store</strong>
               <span>This stays private to your organization.</span>
             </button>

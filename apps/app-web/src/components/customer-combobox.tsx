@@ -163,9 +163,9 @@ export function CustomerCombobox({
             else if (event.key === 'Escape') { setPendingSubmit(false); setQuery(''); }
           }}
         />
-        <button type="button" aria-label="Find customer" disabled={term === ''} onClick={() => inputRef.current?.select()}><PosSearchIcon /></button>
+        <button type="button" tabIndex={-1} aria-label="Find customer" disabled={term === ''} onClick={() => inputRef.current?.select()}><PosSearchIcon /></button>
         {selectedLabel !== null && (
-          <button type="button" className="selected-customer" onClick={onClear}>
+          <button type="button" tabIndex={-1} className="selected-customer" onClick={onClear}>
             {selectedLabel} <span aria-hidden="true">×</span>
           </button>
         )}
@@ -178,6 +178,7 @@ export function CustomerCombobox({
             )}
             <button
               type="button"
+              tabIndex={-1}
               className="customer-history-toggle"
               aria-expanded={historyOpen}
               onClick={() => { setHistoryOpen((open) => !open); if (!historyOpen) void historyQuery.refetch(); }}
@@ -217,6 +218,7 @@ export function CustomerCombobox({
               ref={(node) => { rowRefs.current[index] = node; }}
               type="button"
               role="option"
+              tabIndex={-1}
               className="customer-suggest-row"
               onClick={() => choose(match)}
               onKeyDown={(event) => rowKeyDown(event, index)}
@@ -229,6 +231,7 @@ export function CustomerCombobox({
             ref={(node) => { rowRefs.current[newRowRefIndex] = node; }}
             type="button"
             role="option"
+            tabIndex={-1}
             className="customer-suggest-new"
             disabled={creating}
             onClick={() => void addNew(term)}
