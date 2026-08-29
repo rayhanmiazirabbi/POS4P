@@ -34,6 +34,12 @@ from app.security import as_utc, generate_token, hash_token, utc_now, verify_sec
 from app.services.audit import enqueue_outbox, record_audit, redact
 from app.services.customers import load_customer
 from app.services.idempotency import remember, replay
+from app.services.loyalty import (
+    find_account_for_customer,
+    get_account_by_customer,
+    redeem_for_sale,
+    restore_for_sale,
+)
 from app.services.inventory import (
     InsufficientStock,
     _apply_to_balance,
@@ -56,6 +62,9 @@ class SaleCreated:
     sale: Sale
     items: list[SaleItem] = field(default_factory=list)
     payments: list[Any] = field(default_factory=list)
+    #: The loyalty balance after this sale's redemption, when one happened; only
+    #: the creating call can know it, so replays carry it inside ``replay_body``.
+    loyalty_balance_after: int | None = None
     #: Set when an idempotent replay served a stored response body instead.
     replay_body: dict[str, Any] | None = None
 
@@ -347,6 +356,33 @@ async def create_sale(
         raise ValidationError("Advance cannot exceed the sale total")
     amount_due_now = (totals.total - advance).quantize(CENT)
 
+    # Loyalty redemption is priced and guarded here, inside the sale's
+    # transaction, because only the server can convert points to money at the
+    # configured rate and only a transaction can keep two tills from spending
+    # one balance twice. The ledger row is written after the payments clear.
+    loyalty_points = 0
+    loyalty_credit = Decimal("0.00")
+    loyalty_account = None
+    loyalty_balance_after: int | None = None
+    if payload.loyalty_redemption is not None:
+        if customer is None:
+            raise ValidationError("Loyalty redemption requires a customer")
+        loyalty_account = await get_account_by_customer(session, context, payload.customer_id)
+        loyalty_points = payload.loyalty_redemption.points
+        if int(loyalty_account.balance) < loyalty_points:
+            raise ValidationError("Insufficient loyalty points")
+        organization = await session.get(Organization, context.organization_id)
+        settings = coerce_settings(
+            OrganizationSettings, organization.settings if organization else None
+        )
+        point_value = Decimal(settings.loyalty_point_value)
+        if point_value <= 0:
+            raise ValidationError("Loyalty redemption is not enabled for this organization")
+        loyalty_credit = (Decimal(loyalty_points) * point_value).quantize(CENT)
+        if loyalty_credit > amount_due_now:
+            raise ValidationError("Loyalty credit exceeds the amount due")
+        amount_due_now = (amount_due_now - loyalty_credit).quantize(CENT)
+
     # Allocate every line first so one shortfall aborts before any write.
     allocations_by_line: list[list[Any]] = []
     for line in payload.items:
@@ -373,6 +409,8 @@ async def create_sale(
         other_fee=totals.other_fee,
         advance_applied=advance,
         advance_reference=(payload.advance_application.reference if payload.advance_application else None),
+        loyalty_points_redeemed=loyalty_points,
+        loyalty_credit=loyalty_credit,
         total=totals.total,
         idempotency_key=idempotency_key,
         receipt_number=await _next_receipt_number(session, context.store_id),
@@ -436,7 +474,18 @@ async def create_sale(
         paid += Decimal(tender.amount)
     if paid.quantize(CENT) != amount_due_now:
         await session.rollback()
-        raise Conflict("Payments must add up to the amount due after advance")
+        raise Conflict("Payments must add up to the amount due after advance and loyalty credit")
+
+    if loyalty_account is not None and loyalty_points > 0:
+        loyalty_balance_after = redeem_for_sale(
+            session,
+            context,
+            loyalty_account,
+            points=loyalty_points,
+            sale_id=sale.id,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+        )
 
     record_audit(
         session,
@@ -462,6 +511,11 @@ async def create_sale(
     )
 
     body = sale_body(sale, items, payments)
+    if loyalty_balance_after is not None:
+        # Only the creating call knows the balance after redemption; a re-read
+        # of the sale cannot reconstruct it without replaying every later
+        # transaction, so the field stays null everywhere else.
+        body["loyaltyBalanceAfter"] = loyalty_balance_after
     remember(
         session,
         context.organization_id,
@@ -478,7 +532,7 @@ async def create_sale(
     except Exception:
         await session.rollback()
         raise
-    return SaleCreated(sale=sale, items=items, payments=payments)
+    return SaleCreated(sale=sale, items=items, payments=payments, loyalty_balance_after=loyalty_balance_after)
 
 
 async def _consume(
@@ -839,13 +893,25 @@ async def create_sale_return(
         await session.rollback()
         raise Conflict("Return could not be created") from exc
 
-    # The refund is booked against the tenders it came in on, which is what keeps
-    # the customer's due balance and the day's payment mix derivable from the ledger.
+    # The refund is booked against the layers that paid the sale, in reverse:
+    # advance money returns to the customer's advance balance first, then the
+    # loyalty-credit share comes back as points, and only what the tenders
+    # actually carried is refunded as money. Refunding a redemption's worth of
+    # cash against a 5.00 tender is how a sale's own books come to disagree with
+    # the ledger -- ``refund_payments`` refuses it, and rightly.
     if advance_restored > 0:
         assert sale.customer_id is not None
         customer = await load_customer(session, context, sale.customer_id)
         customer.advance_balance = Decimal(customer.advance_balance) + advance_restored
-    tender_refund = refund_total - advance_restored
+    refund_after_advance = refund_total - advance_restored
+    credit = Decimal(sale.loyalty_credit)
+    tender_capacity = Decimal(sale.total) - Decimal(sale.advance_applied) - credit
+    loyalty_share = Decimal("0.00")
+    if credit > 0 and tender_capacity > 0:
+        loyalty_share = (refund_after_advance * credit / (credit + tender_capacity)).quantize(CENT)
+    elif credit > 0:
+        loyalty_share = refund_after_advance
+    tender_refund = (refund_after_advance - loyalty_share).quantize(CENT)
     if tender_refund > 0:
         await refund_payments(
             session,
@@ -856,6 +922,25 @@ async def create_sale_return(
             request_id=request_id,
             key_prefix=f"return:{sale_return.id}",
         )
+
+    # Points proportional to the refunded credit share. The floor can leave a
+    # fraction of a point unreturned on the last partial return; rounding up
+    # would hand back points the customer never paid for, which is the worse
+    # drift.
+    if loyalty_share > 0 and sale.customer_id is not None and credit > 0:
+        account = await find_account_for_customer(session, context.organization_id, sale.customer_id)
+        if account is not None:
+            restore = int(loyalty_share * int(sale.loyalty_points_redeemed) / credit)
+            if restore > 0:
+                restore_for_sale(
+                    session,
+                    context,
+                    account,
+                    points=restore,
+                    sale_id=sale.id,
+                    idempotency_key=f"return:{sale_return.id}",
+                    request_id=request_id,
+                )
 
     record_audit(
         session,
@@ -965,7 +1050,13 @@ async def void_sale(
 
     # A voided sale leaves every revenue report, so any credit it created has to
     # go with it -- otherwise the customer owes for a transaction the books deny.
-    tender_total = Decimal(sale.total) - Decimal(sale.advance_applied)
+    # The tenders only ever carried what the advance and the loyalty credit did
+    # not, so that is all ``refund_payments`` may hand back.
+    tender_total = (
+        Decimal(sale.total)
+        - Decimal(sale.advance_applied)
+        - Decimal(sale.loyalty_credit)
+    )
     if tender_total > 0:
         await refund_payments(
             session,
@@ -979,6 +1070,22 @@ async def void_sale(
     if Decimal(sale.advance_applied) > 0 and sale.customer_id is not None:
         customer = await load_customer(session, context, sale.customer_id)
         customer.advance_balance = Decimal(customer.advance_balance) + Decimal(sale.advance_applied)
+
+    # A void drops the sale out of revenue entirely, so the points it burned
+    # come back in full -- unlike a partial return, there is nothing left for
+    # the remainder of the redemption to be "for".
+    if sale.loyalty_points_redeemed > 0 and sale.customer_id is not None:
+        account = await find_account_for_customer(session, context.organization_id, sale.customer_id)
+        if account is not None:
+            restore_for_sale(
+                session,
+                context,
+                account,
+                points=int(sale.loyalty_points_redeemed),
+                sale_id=sale.id,
+                idempotency_key=f"void:{sale.id}",
+                request_id=request_id,
+            )
 
     record_audit(
         session,
@@ -1031,7 +1138,14 @@ def sale_body(sale: Sale, items: list[SaleItem], payments: list[Any]) -> dict[st
         other_fee=Decimal(sale.other_fee),
         advance_applied=Decimal(sale.advance_applied),
         advance_reference=sale.advance_reference,
-        amount_due_now=(Decimal(sale.total) - Decimal(sale.advance_applied)).quantize(CENT),
+        loyalty_points_redeemed=int(sale.loyalty_points_redeemed),
+        loyalty_credit=Decimal(sale.loyalty_credit),
+        loyalty_balance_after=None,
+        amount_due_now=(
+            Decimal(sale.total)
+            - Decimal(sale.advance_applied)
+            - Decimal(sale.loyalty_credit)
+        ).quantize(CENT),
         total=Decimal(sale.total),
         receipt_number=sale.receipt_number,
         void_reason=sale.void_reason,

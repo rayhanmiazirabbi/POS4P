@@ -137,6 +137,105 @@ async def get_account_by_customer(
     return account
 
 
+async def find_account_for_customer(
+    session: AsyncSession, organization_id: UUID, customer_id: UUID
+) -> LoyaltyAccount | None:
+    """Lookup without context checks, for corrections that must not 404 mid-flight."""
+    return await session.scalar(
+        select(LoyaltyAccount).where(
+            LoyaltyAccount.organization_id == organization_id,
+            LoyaltyAccount.customer_id == customer_id,
+        )
+    )
+
+
+def redeem_for_sale(
+    session: AsyncSession,
+    context: RequestContext,
+    account: LoyaltyAccount,
+    *,
+    points: int,
+    sale_id: UUID,
+    idempotency_key: str,
+    request_id: str,
+) -> int:
+    """Deduct points inside the sale's transaction. No commit, no role check.
+
+    ``create_sale`` owns the balance guard and the rollback: a sale that fails
+    anywhere rolls this ledger row and the balance back with it, which is the
+    only way a redemption can be as atomic as the payment rows beside it. The
+    caller's idempotency key is namespaced so it can never collide with a
+    counter-posted transaction for the same account.
+    """
+    delta = -abs(points)
+    session.add(
+        LoyaltyTransaction(
+            organization_id=context.organization_id,
+            account_id=account.id,
+            transaction_type=LoyaltyTransactionType.REDEEM,
+            points=delta,
+            source_type="sale",
+            source_id=sale_id,
+            idempotency_key=f"loyalty:{idempotency_key}",
+            created_at=utc_now(),
+        )
+    )
+    account.balance = int(account.balance) + delta
+    record_audit(
+        session,
+        context,
+        action="loyalty.redeem",
+        entity_type="loyalty_transaction",
+        entity_id=account.id,
+        request_id=request_id,
+        after=redact({"points": str(delta), "sale_id": str(sale_id), "balance": str(account.balance)}),
+    )
+    return int(account.balance)
+
+
+def restore_for_sale(
+    session: AsyncSession,
+    context: RequestContext,
+    account: LoyaltyAccount,
+    *,
+    points: int,
+    sale_id: UUID,
+    idempotency_key: str,
+    request_id: str,
+) -> int:
+    """Give redeemed points back when the sale's money is refunded; same rules.
+
+    Used by returns (proportionally) and voids (in full). The key is the caller's
+    correction id, so a retried correction restores once, never twice.
+    """
+    delta = abs(points)
+    if delta <= 0:
+        return int(account.balance)
+    session.add(
+        LoyaltyTransaction(
+            organization_id=context.organization_id,
+            account_id=account.id,
+            transaction_type=LoyaltyTransactionType.REFUND,
+            points=delta,
+            source_type="sale",
+            source_id=sale_id,
+            idempotency_key=f"loyalty:{idempotency_key}",
+            created_at=utc_now(),
+        )
+    )
+    account.balance = int(account.balance) + delta
+    record_audit(
+        session,
+        context,
+        action="loyalty.refund",
+        entity_type="loyalty_transaction",
+        entity_id=account.id,
+        request_id=request_id,
+        after=redact({"points": str(delta), "sale_id": str(sale_id), "balance": str(account.balance)}),
+    )
+    return int(account.balance)
+
+
 async def apply_transaction(
     session: AsyncSession,
     context: RequestContext,

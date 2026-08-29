@@ -54,6 +54,12 @@ export function ReceiptDocument({ printable, className = '' }: { printable: Prin
         {config.showCharges && Number(receipt.otherFee?.amount ?? 0) !== 0 && <ReceiptRow label={receipt.otherFeeLabel ?? 'Other fee'} amount={receipt.otherFee?.amount ?? '0.00'} />}
         {config.showTotal && <ReceiptRow label="Total" amount={receipt.totals.total.amount} total />}
         {config.showPayments && Number(receipt.advanceApplied?.amount ?? 0) !== 0 && <ReceiptRow label="Advance applied" amount={`-${receipt.advanceApplied?.amount ?? '0.00'}`} {...(receipt.advanceReference === undefined ? {} : { note: receipt.advanceReference })} />}
+        {config.showPayments && receipt.loyaltyPointsRedeemed !== undefined && receipt.loyaltyCredit !== undefined && (
+          <ReceiptRow label="Points redeemed" amount={`-${receipt.loyaltyCredit.amount}`} note={`${receipt.loyaltyPointsRedeemed} pts`} />
+        )}
+        {config.showPayments && receipt.loyaltyPointsRedeemed !== undefined && receipt.loyaltyBalanceAfter != null && (
+          <ReceiptRow label="Points balance" amount={`${receipt.loyaltyBalanceAfter} pts`} currency={false} />
+        )}
         {config.showPayments && receipt.payments.map((payment, index) => payment.method !== 'due' ? <ReceiptRow key={`${payment.method}-${index}`} label={payment.method} amount={payment.amount.amount} /> : null)}
         {config.showCashReceived && receipt.payments.map((payment, index) => payment.method === 'cash' && payment.receivedAmount
           ? <ReceiptRow key={`received-${index}`} label="Cash received" amount={payment.receivedAmount.amount} />
@@ -67,8 +73,8 @@ export function ReceiptDocument({ printable, className = '' }: { printable: Prin
   );
 }
 
-function ReceiptRow({ label, amount, total = false, emphasis = false, note }: { label: string; amount: string; total?: boolean; emphasis?: boolean; note?: string | null }): ReactNode {
+function ReceiptRow({ label, amount, total = false, emphasis = false, note, currency = true }: { label: string; amount: string; total?: boolean; emphasis?: boolean; note?: string | null; currency?: boolean }): ReactNode {
   return <p className={total ? 'receipt-row receipt-row--total' : emphasis ? 'receipt-row receipt-row--emphasis' : 'receipt-row'}>
-    <span>{label}{note ? <small>{note}</small> : null}</span><strong>৳{amount}</strong>
+    <span>{label}{note ? <small>{note}</small> : null}</span><strong>{currency ? `৳${amount}` : amount}</strong>
   </p>;
 }

@@ -46,6 +46,10 @@ class Sale(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     other_fee: Mapped[Decimal] = mapped_column(money_column(), default=0, nullable=False)
     advance_applied: Mapped[Decimal] = mapped_column(money_column(), default=0, nullable=False)
     advance_reference: Mapped[str | None] = mapped_column(String(160))
+    #: Points burned as tender on this sale, and the money they paid for. The
+    #: loyalty ledger row (source ``sale``) carries the same pair's other half.
+    loyalty_points_redeemed: Mapped[int] = mapped_column(default=0, nullable=False)
+    loyalty_credit: Mapped[Decimal] = mapped_column(money_column(), default=0, nullable=False)
     total: Mapped[Decimal] = mapped_column(money_column(), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     receipt_number: Mapped[str | None] = mapped_column(String(80))

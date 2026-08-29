@@ -279,6 +279,11 @@ export type Receipt = {
   otherFee?: MoneyValue;
   advanceApplied?: MoneyValue;
   advanceReference?: string | null;
+  /** Points burned as tender on this sale, and the money they paid for. */
+  loyaltyPointsRedeemed?: number;
+  loyaltyCredit?: MoneyValue;
+  /** Account balance after the redemption; only the creating call knows it. */
+  loyaltyBalanceAfter?: number | null;
   /** Cash handed back across the cash tenders. */
   change: MoneyValue;
 };
@@ -305,6 +310,9 @@ export type FiledSale = {
   otherFee?: string;
   advanceApplied?: string;
   advanceReference?: string | null;
+  loyaltyPointsRedeemed?: number;
+  loyaltyCredit?: string;
+  loyaltyBalanceAfter?: number | null;
   items: readonly { productName: string; quantity: string; unitPrice: string; lineTotal: string }[];
   payments: readonly { method: PaymentMethod; amount: string; receivedAmount?: string | null }[];
 };
@@ -345,7 +353,10 @@ export function receiptFromSale(sale: FiledSale, header: ReceiptHeader): Receipt
   }));
   const total = money(sale.total);
   const advanceApplied = money(sale.advanceApplied ?? '0.00');
-  const paid = add(advanceApplied, ...payments.map((payment) => payment.amount));
+  const loyaltyCredit = money(sale.loyaltyCredit ?? '0.00');
+  // The loyalty credit paid for part of the sale exactly like the tenders did;
+  // leaving it out would print it as money still owed.
+  const paid = add(advanceApplied, loyaltyCredit, ...payments.map((payment) => payment.amount));
   return frozenReceipt({
     receiptNumber: sale.receiptNumber ?? null,
     saleId: sale.id,
@@ -362,6 +373,9 @@ export function receiptFromSale(sale: FiledSale, header: ReceiptHeader): Receipt
     otherFee: money(sale.otherFee ?? '0.00'),
     advanceApplied,
     advanceReference: sale.advanceReference ?? null,
+    ...(sale.loyaltyPointsRedeemed && sale.loyaltyPointsRedeemed > 0 ? { loyaltyPointsRedeemed: sale.loyaltyPointsRedeemed } : {}),
+    ...(sale.loyaltyCredit && sale.loyaltyCredit !== '0.00' ? { loyaltyCredit } : {}),
+    loyaltyBalanceAfter: sale.loyaltyBalanceAfter ?? null,
   });
 }
 

@@ -42,6 +42,11 @@ class AdvanceApplicationInput(ApiModel):
     reference: Annotated[str | None, Field(max_length=160)] = None
 
 
+class LoyaltyRedemptionInput(ApiModel):
+    """Points burned as tender; the server prices them from org settings."""
+    points: Annotated[int, Field(gt=0, le=10_000_000)]
+
+
 class PaymentInput(ApiModel):
     # A configured method slug, not the built-in enum: tenants define their own
     # digital tenders. The service checks it against organization settings.
@@ -57,6 +62,7 @@ class SaleCreateRequest(ApiModel):
     global_discount: DiscountInput | None = None
     charges: list[SaleChargeInput] = Field(default_factory=list)
     advance_application: AdvanceApplicationInput | None = None
+    loyalty_redemption: LoyaltyRedemptionInput | None = None
     discount_approval_token: Annotated[str | None, Field(max_length=200)] = None
     items: Annotated[list[SaleLineCreate], Field(min_length=1)]
     payments: Annotated[list[PaymentInput], Field(min_length=1)]
@@ -100,6 +106,10 @@ class SaleResponse(ApiModel):
     other_fee: Decimal = Decimal("0.00")
     advance_applied: Decimal = Decimal("0.00")
     advance_reference: str | None = None
+    loyalty_points_redeemed: int = 0
+    loyalty_credit: Decimal = Decimal("0.00")
+    #: Account balance after this sale's redemption; null when none happened.
+    loyalty_balance_after: int | None = None
     amount_due_now: Decimal = Decimal("0.00")
     total: Decimal
     receipt_number: str | None
@@ -149,5 +159,5 @@ class DiscountApprovalResponse(ApiModel):
 
 # Resolve deferred annotations eagerly so route registration never sees a
 # partially-built model regardless of module import order.
-for _model in (DiscountInput, SaleLineCreate, SaleChargeInput, AdvanceApplicationInput, PaymentInput, SaleCreateRequest, SaleItemResponse, SaleResponse, SaleReturnLine, SaleReturnRequest, SaleReturnResponse, SaleVoidRequest, DiscountApprovalRequest, DiscountApprovalResponse):
+for _model in (DiscountInput, SaleLineCreate, SaleChargeInput, AdvanceApplicationInput, LoyaltyRedemptionInput, PaymentInput, SaleCreateRequest, SaleItemResponse, SaleResponse, SaleReturnLine, SaleReturnRequest, SaleReturnResponse, SaleVoidRequest, DiscountApprovalRequest, DiscountApprovalResponse):
     _model.model_rebuild()

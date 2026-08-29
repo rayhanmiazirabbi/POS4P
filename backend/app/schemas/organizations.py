@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_serializer, field_validator
 
 from app.models import RecordStatus, Role
 from app.schemas.base import ApiModel
@@ -77,8 +78,11 @@ class OrganizationSettings(ApiModel):
     allow_negative_stock: bool = False
     receipt_footer: str | None = None
     #: Loyalty points earned per 100 spent, posted against the completed sale.
-    #: Zero disables earning; there is no redemption-as-tender yet.
+    #: Zero disables earning.
     loyalty_points_per_hundred: Annotated[int, Field(ge=0, le=1000)] = 0
+    #: What one point pays for at redemption, in currency units. Zero disables
+    #: redemption even when a balance exists.
+    loyalty_point_value: Annotated[Decimal, Field(ge=0, le=1000, decimal_places=2)] = Decimal("1.00")
     payment_methods: Annotated[
         list[PaymentMethodSetting], Field(default_factory=lambda: [
             PaymentMethodSetting(value="bkash", label="bKash"),
@@ -101,6 +105,13 @@ class OrganizationSettings(ApiModel):
     def _valid_payment_methods(cls, value: list[PaymentMethodSetting]) -> list[PaymentMethodSetting]:
         return _validate_payment_methods(value)
 
+    @field_serializer("loyalty_point_value")
+    def _point_value_as_string(self, value: Decimal | None) -> str | None:
+        # Settings live in a JSON column, which cannot hold a Decimal; the string
+        # round-trips back into one on read, and the wire speaks money-as-string
+        # everywhere else anyway.
+        return None if value is None else str(value)
+
 
 class OrganizationSettingsUpdate(ApiModel):
     """Partial patch: only keys present in the body are written."""
@@ -114,6 +125,7 @@ class OrganizationSettingsUpdate(ApiModel):
     allow_negative_stock: bool | None = None
     receipt_footer: str | None = None
     loyalty_points_per_hundred: Annotated[int | None, Field(ge=0, le=1000)] = None
+    loyalty_point_value: Annotated[Decimal | None, Field(ge=0, le=1000, decimal_places=2)] = None
     payment_methods: list[PaymentMethodSetting] | None = None
 
     @field_validator("default_timezone")

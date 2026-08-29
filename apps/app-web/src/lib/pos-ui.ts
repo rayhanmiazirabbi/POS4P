@@ -11,10 +11,12 @@ type PosUiState = {
   cashReceived: string;
   digitalAmount: string;
   digitalMethod: DigitalMethod;
+  redeemPoints: string;
   receipt: PrintableReceipt | null;
   setCashReceived: (value: string) => void;
   setDigitalAmount: (value: string) => void;
   setDigitalMethod: (method: DigitalMethod) => void;
+  setRedeemPoints: (value: string) => void;
   setReceipt: (receipt: PrintableReceipt | null) => void;
   resetTender: () => void;
 };
@@ -28,10 +30,12 @@ export const usePosUi = create<PosUiState>()((set) => ({
   cashReceived: '',
   digitalAmount: '',
   digitalMethod: '',
+  redeemPoints: '',
   receipt: null,
   setCashReceived: (cashReceived) => set({ cashReceived }),
   setDigitalAmount: (digitalAmount) => set({ digitalAmount }),
   setDigitalMethod: (digitalMethod) => set({ digitalMethod }),
+  setRedeemPoints: (redeemPoints) => set({ redeemPoints }),
   setReceipt: (receipt) => set({ receipt }),
-  resetTender: () => set({ cashReceived: '', digitalAmount: '' }),
+  resetTender: () => set({ cashReceived: '', digitalAmount: '', redeemPoints: '' }),
 }));

@@ -122,7 +122,10 @@ async def create_sale(
         return Envelope(
             data=SaleResponse.model_validate(result.replay_body), request_id=request_id
         )
-    return Envelope(data=_response(result.sale, result.items, result.payments), request_id=request_id)
+    response = _response(result.sale, result.items, result.payments)
+    if result.loyalty_balance_after is not None:
+        response.loyalty_balance_after = result.loyalty_balance_after
+    return Envelope(data=response, request_id=request_id)
 
 
 @router.post(

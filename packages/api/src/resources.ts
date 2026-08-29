@@ -47,6 +47,8 @@ export type OrganizationSettings = {
   receiptFooter: string | null;
   /** Points earned per 100 spent on a completed sale; 0 disables loyalty earning. */
   loyaltyPointsPerHundred: number;
+  /** What one point pays at redemption; "0.00" disables redemption. Money-as-string. */
+  loyaltyPointValue: string;
   /** Digital tenders this tenant may book; cash and due are structural and never listed. */
   paymentMethods: ConfiguredPaymentMethod[];
 };
@@ -502,6 +504,10 @@ export type Sale = {
   otherFee: string;
   advanceApplied: string;
   advanceReference?: string | null;
+  loyaltyPointsRedeemed: number;
+  loyaltyCredit: string;
+  /** Balance after this sale's redemption; null on re-reads and non-redemptive sales. */
+  loyaltyBalanceAfter?: number | null;
   amountDueNow: string;
   total: string;
   receiptNumber?: string | null;
@@ -525,6 +531,8 @@ export type SaleCreateRequest = {
   globalDiscount?: DiscountInput;
   charges?: readonly SaleChargeInput[];
   advanceApplication?: AdvanceApplicationInput;
+  /** Points burned as tender; priced from org settings, guarded server-side. */
+  loyaltyRedemption?: { points: number };
   discountApprovalToken?: string;
   items: readonly { storeProductId: string; quantity: string; discount?: DiscountInput }[];
   payments: readonly SalePaymentInput[];

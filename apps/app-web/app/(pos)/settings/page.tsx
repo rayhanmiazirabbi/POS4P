@@ -19,11 +19,12 @@ import {
   validReceiptWidth,
   type ReceiptConfig,
 } from '@/lib/receipt';
+import { decimalEntry } from '@/lib/numeric-input';
 import { useSession } from '@/lib/session';
 
 type OrganizationForm = {
   name: string; slug: string; defaultTimezone: string; locale: string;
-  requirePinForDiscounts: boolean; expiryAlertDays: string; lowStockThresholdDays: string; loyaltyPointsPerHundred: string;
+  requirePinForDiscounts: boolean; expiryAlertDays: string; lowStockThresholdDays: string; loyaltyPointsPerHundred: string; loyaltyPointValue: string;
   allowNegativeStock: boolean; receiptFooter: string;
 };
 
@@ -34,7 +35,7 @@ type BranchForm = {
 
 const blankOrganization: OrganizationForm = {
   name: '', slug: '', defaultTimezone: 'Asia/Dhaka', locale: 'en-BD', requirePinForDiscounts: true,
-  expiryAlertDays: '90', lowStockThresholdDays: '14', loyaltyPointsPerHundred: '0', allowNegativeStock: false, receiptFooter: '',
+  expiryAlertDays: '90', lowStockThresholdDays: '14', loyaltyPointsPerHundred: '0', loyaltyPointValue: '1.00', allowNegativeStock: false, receiptFooter: '',
 };
 const blankBranch: BranchForm = {
   name: '', timezone: 'Asia/Dhaka', businessDayCutoffHour: '0', lowStockAlerts: true, allowOfflineSales: true,
@@ -101,6 +102,7 @@ export default function SettingsPage(): ReactNode {
       requirePinForDiscounts: organizationQuery.data.requirePinForDiscounts,
       expiryAlertDays: String(organizationQuery.data.expiryAlertDays), lowStockThresholdDays: String(organizationQuery.data.lowStockThresholdDays),
       loyaltyPointsPerHundred: String(organizationQuery.data.loyaltyPointsPerHundred ?? 0),
+      loyaltyPointValue: organizationQuery.data.loyaltyPointValue ?? '1.00',
       allowNegativeStock: organizationQuery.data.allowNegativeStock, receiptFooter: organizationQuery.data.receiptFooter ?? '',
     };
     setOrganization(next); setOrganizationSaved(next);
@@ -153,6 +155,7 @@ export default function SettingsPage(): ReactNode {
         defaultTimezone: organization.defaultTimezone.trim(), defaultCurrency: 'BDT', locale: organization.locale.trim(),
         requirePinForDiscounts: organization.requirePinForDiscounts, expiryAlertDays: Number(organization.expiryAlertDays),
         loyaltyPointsPerHundred: Number(organization.loyaltyPointsPerHundred || '0'),
+        loyaltyPointValue: organization.loyaltyPointValue.trim() || '0.00',
         lowStockThresholdDays: Number(organization.lowStockThresholdDays), allowNegativeStock: organization.allowNegativeStock,
         receiptFooter: organization.receiptFooter.trim() || null,
       });
@@ -257,6 +260,7 @@ export default function SettingsPage(): ReactNode {
             <Field label="Locale"><input className="field" value={organization.locale} onChange={(event) => setOrganization({ ...organization, locale: event.target.value })} /></Field>
             <Field label="Expiry alert days"><input className="field" type="number" min={1} max={365} value={organization.expiryAlertDays} onChange={(event) => setOrganization({ ...organization, expiryAlertDays: event.target.value.replace(/\D/g, '') })} /></Field>
             <Field label="Loyalty points per ৳100 spent (0 = off)"><input className="field" type="number" min={0} max={1000} value={organization.loyaltyPointsPerHundred} onChange={(event) => setOrganization({ ...organization, loyaltyPointsPerHundred: event.target.value.replace(/\D/g, '') })} /></Field>
+            <Field label="Value of one point at redemption (৳, 0 = off)"><input className="field" inputMode="decimal" min={0} max={1000} step="0.01" value={organization.loyaltyPointValue} onChange={(event) => setOrganization({ ...organization, loyaltyPointValue: decimalEntry(event.target.value) })} /></Field>
             <Field label="Low-stock forecast days"><input className="field" type="number" min={1} max={180} value={organization.lowStockThresholdDays} onChange={(event) => setOrganization({ ...organization, lowStockThresholdDays: event.target.value.replace(/\D/g, '') })} /></Field>
           </div>
           <Field label="Organization receipt footer"><textarea className="field field--textarea" maxLength={1000} value={organization.receiptFooter} onChange={(event) => setOrganization({ ...organization, receiptFooter: event.target.value })} /></Field>

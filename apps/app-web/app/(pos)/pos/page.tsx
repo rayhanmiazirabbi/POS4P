@@ -88,10 +88,12 @@ export default function PosPage(): ReactNode {
   const cashReceived = usePosUi((state) => state.cashReceived);
   const digitalAmount = usePosUi((state) => state.digitalAmount);
   const digitalMethod = usePosUi((state) => state.digitalMethod);
+  const redeemPoints = usePosUi((state) => state.redeemPoints);
   const receipt = usePosUi((state) => state.receipt);
   const setCashReceived = usePosUi((state) => state.setCashReceived);
   const setDigitalAmount = usePosUi((state) => state.setDigitalAmount);
   const setDigitalMethod = usePosUi((state) => state.setDigitalMethod);
+  const setRedeemPoints = usePosUi((state) => state.setRedeemPoints);
   const setReceipt = usePosUi((state) => state.setReceipt);
   const resetTender = usePosUi((state) => state.resetTender);
   const [error, setError] = useState<string | null>(null);
@@ -163,8 +165,10 @@ export default function PosPage(): ReactNode {
     queryFn: async () => (await pharmacyApi.loyalty.enroll({ customerId: customerId as string })).data,
   });
 
-  // The stored choice can fall out of the configured list (a method renamed
-  // inactive, settings just loaded); re-anchor it to the first real method.
+  // A different customer's points must never ride along on the next sale.
+  useEffect(() => { setRedeemPoints(''); }, [customerId, setRedeemPoints]);
+
+  // The stored choice can fall out of the configured list (a method renamed  // inactive, settings just loaded); re-anchor it to the first real method.
   useEffect(() => {
     if (digitalMethods.length === 0) {
       if (digitalMethod !== '') setDigitalMethod('');
@@ -446,7 +450,19 @@ export default function PosPage(): ReactNode {
     resetTender();
   }
 
-  const split = splitTender(dueNow.amount, cashReceived, digitalAmount);
+  // Loyalty redemption: what the entered points pay for and what they may not
+  // exceed. The caps are advisory -- the server re-guards inside the sale's
+  // transaction -- but refusing here keeps the cart on screen instead of a
+  // rejected sale after the customer has left.
+  const pointValue = Number(settingsQuery.data?.loyaltyPointValue ?? '0');
+  const availablePoints = loyaltyAccount.data?.balance ?? 0;
+  const redeemEntered = redeemPoints.trim() === '' ? 0 : Math.floor(Number(redeemPoints) || 0);
+  const maxByDue = pointValue > 0 ? Math.floor(Number(dueNow.amount) / pointValue) : 0;
+  const effectiveRedeem = Math.max(0, Math.min(redeemEntered, availablePoints, maxByDue));
+  const loyaltyCredit = (effectiveRedeem * pointValue).toFixed(2);
+  const collectNow = (Math.max(Number(dueNow.amount) - Number(loyaltyCredit), 0)).toFixed(2);
+
+  const split = splitTender(collectNow, cashReceived, digitalAmount);
 
   async function checkout(approvalToken?: string): Promise<void> {
     if (cart.length === 0 || user === null) return;
@@ -466,6 +482,12 @@ export default function PosPage(): ReactNode {
       setError('Enter the tendered amounts as plain numbers, e.g. 250 or 250.50');
       return;
     }
+    if (effectiveRedeem > 0 && !navigator.onLine) {
+      // The server prices and deducts points inside the sale's transaction; an
+      // offline queue entry cannot carry that guarantee, so it never tries.
+      setError('Redeeming points needs a connection. Clear the redemption or reconnect to sell offline.');
+      return;
+    }
     setBusy(true);
     setError(null);
     // The tender rows, the "at least one payment" rule and the cash `receivedAmount`
@@ -475,7 +497,8 @@ export default function PosPage(): ReactNode {
       // Checked before posting because every one of these is a refusal the server
       // makes after the fact -- by which point the cart is cleared and the customer
       // is walking away. `Due payments require a customer` is the one a counter hits.
-      validateSalePayments(payments, money(dueNow.amount), { hasCustomer: customerId !== null });
+      // The total here is what the tenders must cover: after advance and points.
+      validateSalePayments(payments, money(collectNow), { hasCustomer: customerId !== null });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The tendered amounts do not add up');
       setBusy(false);
@@ -493,6 +516,7 @@ export default function PosPage(): ReactNode {
       ...(globalDiscount === undefined ? {} : { globalDiscount }),
       ...(charges.length === 0 ? {} : { charges }),
       ...(advance.trim() === '' || Number(advance) === 0 ? {} : { advanceApplication: { amount: advance, ...(advanceReference.trim() ? { reference: advanceReference.trim() } : {}) } }),
+      ...(effectiveRedeem > 0 ? { loyaltyRedemption: { points: effectiveRedeem } } : {}),
       ...(approvalToken === undefined ? {} : { discountApprovalToken: approvalToken }),
       subtotal: pricing.data.subtotal,
       total: pricing.data.total,
@@ -739,7 +763,25 @@ export default function PosPage(): ReactNode {
           <label style={{ fontSize: tokens.typography.sizes.sm }}>Advance applied<input className="field" inputMode="decimal" placeholder="0.00" value={advance} onChange={(event) => setDraftField('advance', decimalEntry(event.target.value))} /></label>
           <label style={{ fontSize: tokens.typography.sizes.sm }}>Advance reference<input className="field" placeholder="Order or receipt" value={advanceReference} onChange={(event) => setDraftField('advanceReference', event.target.value)} /></label>
         </div>}
-        {advance.trim() !== '' && Number(advance) > 0 && <TotalRow label="Amount to collect now" value={`৳${dueNow.amount}`} />}
+        {customerId !== null && availablePoints > 0 && pointValue > 0 && (
+          <label style={{ fontSize: tokens.typography.sizes.sm, display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
+            Redeem points (of {availablePoints} · ৳{pointValue.toFixed(2)}/pt)
+            <input
+              className="field"
+              inputMode="numeric"
+              placeholder="0"
+              aria-label="Points to redeem"
+              value={redeemPoints}
+              onChange={(event) => setRedeemPoints(event.target.value.replace(/[^\d]/g, ''))}
+            />
+            {effectiveRedeem > 0 && (
+              <small style={{ color: colors.muted }}>
+                Pays ৳{loyaltyCredit} of this sale; ৳{collectNow} left to collect.
+              </small>
+            )}
+          </label>
+        )}
+        {(advance.trim() !== '' && Number(advance) > 0) || effectiveRedeem > 0 ? <TotalRow label="Amount to collect now" value={`৳${collectNow}`} /> : null}
         {dueNow.problem && <p role="alert" className="form-error" style={{ margin: 0 }}>{dueNow.problem}</p>}
 
         <section className="payment-section" aria-label="Payment">
