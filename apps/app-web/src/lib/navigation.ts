@@ -1,7 +1,7 @@
 import { can, type Capability } from '@pharmacy/permissions';
 import type { Role } from '@pharmacy/types';
 
-export type PosRoute = { href: string; label: string; capability: Capability };
+export type PosRoute = { href: string; label: string; capabilities: readonly Capability[] };
 
 /**
  * Every authenticated surface and the capability that opens it.
@@ -22,12 +22,12 @@ export type PosRoute = { href: string; label: string; capability: Capability };
  * Order matters: the first entry a role holds is where that role lands.
  */
 export const POS_ROUTES: readonly PosRoute[] = [
-  { href: '/pos', label: 'POS', capability: 'sales.create' },
-  { href: '/dashboard', label: 'Dashboard', capability: 'reports.read' },
-  { href: '/catalogue', label: 'Catalogue', capability: 'catalogue.search' },
-  { href: '/inventory', label: 'Inventory', capability: 'inventory.adjust' },
-  { href: '/purchasing', label: 'Purchasing', capability: 'purchasing.orders.manage' },
-  { href: '/settings', label: 'Settings', capability: 'store.manage' },
+  { href: '/pos', label: 'POS', capabilities: ['sales.create', 'purchases.receive'] },
+  { href: '/dashboard', label: 'Dashboard', capabilities: ['reports.read'] },
+  { href: '/catalogue', label: 'Catalogue', capabilities: ['catalogue.search'] },
+  { href: '/inventory', label: 'Inventory', capabilities: ['inventory.adjust'] },
+  { href: '/purchasing', label: 'Purchasing', capabilities: ['purchasing.orders.manage'] },
+  { href: '/settings', label: 'Settings', capabilities: ['store.manage'] },
 ];
 
 /** Whether `pathname` is `href` or something nested under it -- segment-aware, so
@@ -41,7 +41,7 @@ export function routeFor(pathname: string): PosRoute | undefined {
 }
 
 export function allowedRoutes(role: Role | null): readonly PosRoute[] {
-  return role === null ? [] : POS_ROUTES.filter((route) => can(role, route.capability));
+  return role === null ? [] : POS_ROUTES.filter((route) => route.capabilities.some((capability) => can(role, capability)));
 }
 
 /** Where a role goes when it has no business on the route it asked for. `null`
@@ -53,5 +53,5 @@ export function landingRoute(role: Role | null): string | null {
 
 export function mayVisit(role: Role | null, pathname: string): boolean {
   const route = routeFor(pathname);
-  return route !== undefined && role !== null && can(role, route.capability);
+  return route !== undefined && role !== null && route.capabilities.some((capability) => can(role, capability));
 }

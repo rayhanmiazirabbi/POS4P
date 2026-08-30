@@ -55,4 +55,6 @@ class SupplierLedgerEntry(AppendOnlyMixin, StoreScopedMixin, UUIDPrimaryKeyMixin
     reference_id: Mapped[UUID | None] = mapped_column()
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
+    payment_method: Mapped[str | None] = mapped_column(String(40))
+    provider_reference: Mapped[str | None] = mapped_column(String(160))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

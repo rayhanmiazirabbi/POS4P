@@ -20,15 +20,20 @@ from app.schemas.base import Envelope, Page
 from app.schemas.purchasing import (
     PurchaseCreateRequest,
     PurchaseItemResponse,
+    PurchaseReceiptResponse,
+    PurchaseReceiveRequest,
     PurchaseResponse,
     PurchaseReturnRequest,
-    PurchaseReturnLine,
 )
 from app.services import purchasing as service
 
 router = APIRouter(prefix="/purchases", tags=["Purchasing"])
 
 StoreManagerDep = Annotated[RequestContext, Depends(require_roles(Role.OWNER, Role.MANAGER))]
+ReceiverDep = Annotated[
+    RequestContext,
+    Depends(require_roles(Role.OWNER, Role.MANAGER, Role.CASHIER, Role.INVENTORY_STAFF)),
+]
 
 
 async def require_idempotency_key(
@@ -46,6 +51,7 @@ def _item(item, *, include_costs: bool) -> PurchaseItemResponse:
     data = PurchaseItemResponse.model_validate(item)
     if not include_costs:
         data.unit_cost = None
+        data.line_total = None
     return data
 
 
@@ -62,6 +68,7 @@ def _purchase(
         supplier_id=purchase.supplier_id,
         status=purchase.status,
         invoice_number=purchase.invoice_number,
+        receipt_number=purchase.receipt_number,
         note=purchase.note,
         purchased_at=purchase.purchased_at,
         confirmed_at=purchase.confirmed_at,
@@ -69,6 +76,29 @@ def _purchase(
         items=[_item(item, include_costs=include_costs) for item in items],
     )
     return data
+
+
+@router.post(
+    "/receive",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Envelope[PurchaseReceiptResponse],
+    summary="Atomically receive supplier goods, payments, and credit",
+)
+async def receive_purchase(
+    payload: PurchaseReceiveRequest,
+    session: SessionDep,
+    context: ReceiverDep,
+    request_id: RequestIdDep,
+    idempotency_key: IdempotentDep,
+) -> Envelope[PurchaseReceiptResponse]:
+    receipt = await service.receive_purchase(
+        session,
+        context,
+        payload,
+        idempotency_key=idempotency_key,
+        request_id=request_id,
+    )
+    return Envelope(data=receipt, request_id=request_id)
 
 
 @router.get(
@@ -109,6 +139,23 @@ async def read_purchase(
     include_costs = service.can_see_costs(context)
     return Envelope(
         data=_purchase(purchase, items, include_costs=include_costs), request_id=request_id
+    )
+
+
+@router.get(
+    "/{purchase_id}/receipt",
+    response_model=Envelope[PurchaseReceiptResponse],
+    summary="Read a confirmed goods-received voucher",
+)
+async def read_purchase_receipt(
+    purchase_id: UUID,
+    session: SessionDep,
+    context: ReceiverDep,
+    request_id: RequestIdDep,
+) -> Envelope[PurchaseReceiptResponse]:
+    return Envelope(
+        data=await service.purchase_receipt(session, context, purchase_id),
+        request_id=request_id,
     )
 
 
@@ -164,6 +211,4 @@ async def create_return(
     returned = await service.return_purchase(session, context, purchase_id, payload, request_id=request_id)
     items = await service.get_purchase_with_items(session, context, returned.id)
     return Envelope(data=_purchase(returned, items[1], include_costs=True), request_id=request_id)
-
-
 

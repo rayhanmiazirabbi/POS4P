@@ -224,6 +224,187 @@ async def test_confirm_requires_idempotency_key_header(
     assert response.status_code == 422
 
 
+# --- direct counter receiving -------------------------------------------------
+
+
+async def test_direct_receive_all_roles_can_post_credit_receipts(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    supplier = await _make_supplier(session, tenant)
+    product = await _make_store_product(session, tenant, sku="ROLE-RECEIVE")
+    await session.commit()
+    for index, role in enumerate((Role.OWNER, Role.MANAGER, Role.CASHIER, Role.INVENTORY_STAFF)):
+        response = await client.post(
+            "/purchases/receive",
+            json={
+                "supplierId": str(supplier.id),
+                "items": [{"storeProductId": str(product.id), "quantity": "1", "unitCost": "5.00"}],
+            },
+            headers={**_headers(tenant, role=role), "Idempotency-Key": f"role-receive-{index:02d}-00000000"},
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()["data"]
+        assert body["receiptNumber"] == f"GRN-{index + 1:08d}"
+        assert body["creditAmount"] == "5.00"
+        assert body["lines"][0]["batchNumber"].startswith(body["receiptNumber"])
+
+
+async def test_direct_receive_line_total_digital_payment_and_replay(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    supplier = await _make_supplier(session, tenant)
+    await session.commit()
+    key = "receive-custom-000000000001"
+    payload = {
+        "supplierId": str(supplier.id),
+        "invoiceNumber": "SUP-44",
+        "items": [{
+            "customProduct": {"name": "Custom Saline", "unit": "bottle", "barcode": "CUST-SALINE-44"},
+            "shelf": {"salePrice": "45.00", "sku": "SAL-44", "rack": "A1"},
+            "quantity": "3",
+            "lineTotal": "100.00",
+        }],
+        "payments": [{"method": "bkash", "amount": "40.00", "providerReference": "TX-44"}],
+    }
+    first = await client.post(
+        "/purchases/receive",
+        json=payload,
+        headers={**_headers(tenant, role=Role.CASHIER), "Idempotency-Key": key},
+    )
+    assert first.status_code == 201, first.text
+    receipt = first.json()["data"]
+    assert receipt["totalAmount"] == "100.00"
+    assert receipt["paidAmount"] == "40.00"
+    assert receipt["creditAmount"] == "60.00"
+    assert receipt["supplierBalanceAfter"] == "60.00"
+    assert receipt["lines"][0]["unitCost"] == "33.33"
+    assert receipt["lines"][0]["lineTotal"] == "100.00"
+    assert receipt["payments"] == [{"method": "bkash", "amount": "40.00", "providerReference": "TX-44"}]
+
+    replay = await client.post(
+        "/purchases/receive",
+        json=payload,
+        headers={**_headers(tenant, role=Role.INVENTORY_STAFF), "Idempotency-Key": key},
+    )
+    assert replay.status_code == 201
+    assert replay.json()["data"]["purchaseId"] == receipt["purchaseId"]
+    movement_count = await session.scalar(select(func.count()).select_from(InventoryMovement))
+    assert int(movement_count or 0) == 1
+
+
+async def test_direct_receive_supplier_total_allows_zero_cost_stock_and_zero_value_return(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    supplier = await _make_supplier(session, tenant)
+    product = await _make_store_product(session, tenant, sku="NO-COST")
+    await session.commit()
+    received = await client.post(
+        "/purchases/receive",
+        json={
+            "supplierId": str(supplier.id),
+            "totalAmount": "75.00",
+            "items": [{"storeProductId": str(product.id), "quantity": "3"}],
+        },
+        headers={**_headers(tenant), "Idempotency-Key": "receive-no-cost-0000000001"},
+    )
+    assert received.status_code == 201, received.text
+    receipt = received.json()["data"]
+    assert receipt["totalAmount"] == "75.00"
+    assert receipt["creditAmount"] == "75.00"
+    assert receipt["lines"][0]["unitCost"] == "0.00"
+    assert receipt["lines"][0]["lineTotal"] == "0.00"
+    batch_cost = await session.scalar(
+        select(InventoryBatch.unit_cost).where(InventoryBatch.store_product_id == product.id)
+    )
+    assert Decimal(batch_cost) == Decimal("0.00")
+
+    returned = await client.post(
+        f"/purchases/{receipt['purchaseId']}/returns",
+        json={"lines": [{"purchaseItemId": receipt["lines"][0]["purchaseItemId"], "quantity": "1"}]},
+        headers=_headers(tenant),
+    )
+    assert returned.status_code == 201, returned.text
+    assert returned.json()["data"]["totalAmount"] == "0.00"
+
+
+async def test_direct_receive_mixed_costs_uses_supplier_total_and_validates_floor(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    supplier = await _make_supplier(session, tenant)
+    costed = await _make_store_product(session, tenant, sku="COSTED")
+    uncosted = await _make_store_product(session, tenant, sku="UNCOSTED")
+    await session.commit()
+    payload = {
+        "supplierId": str(supplier.id),
+        "totalAmount": "80.00",
+        "items": [
+            {"storeProductId": str(costed.id), "quantity": "2", "unitCost": "10.00"},
+            {"storeProductId": str(uncosted.id), "quantity": "4"},
+        ],
+    }
+    response = await client.post(
+        "/purchases/receive",
+        json=payload,
+        headers={**_headers(tenant), "Idempotency-Key": "receive-mixed-cost-0000001"},
+    )
+    assert response.status_code == 201, response.text
+    receipt = response.json()["data"]
+    assert receipt["totalAmount"] == "80.00"
+    by_sku = {line["sku"]: line for line in receipt["lines"]}
+    assert by_sku["COSTED"]["lineTotal"] == "20.00"
+    assert by_sku["UNCOSTED"]["lineTotal"] == "0.00"
+
+    below_costs = await client.post(
+        "/purchases/receive",
+        json={**payload, "totalAmount": "19.99"},
+        headers={**_headers(tenant), "Idempotency-Key": "receive-below-cost-0000001"},
+    )
+    assert below_costs.status_code == 422
+    both_costs = await client.post(
+        "/purchases/receive",
+        json={
+            "supplierId": str(supplier.id),
+            "items": [{"storeProductId": str(costed.id), "quantity": "1", "unitCost": "1.00", "lineTotal": "1.00"}],
+        },
+        headers={**_headers(tenant), "Idempotency-Key": "receive-both-costs-000001"},
+    )
+    assert both_costs.status_code == 422
+
+
+async def test_direct_receive_cash_requires_and_reconciles_open_shift(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    supplier = await _make_supplier(session, tenant)
+    product = await _make_store_product(session, tenant, sku="CASH-RECEIVE")
+    await session.commit()
+    payload = {
+        "supplierId": str(supplier.id),
+        "items": [{"storeProductId": str(product.id), "quantity": "5", "unitCost": "10.00"}],
+        "payments": [{"method": "cash", "amount": "25.00"}],
+    }
+    blocked = await client.post(
+        "/purchases/receive",
+        json=payload,
+        headers={**_headers(tenant, role=Role.CASHIER), "Idempotency-Key": "cash-blocked-000000000001"},
+    )
+    assert blocked.status_code == 409
+
+    opened = await client.post(
+        "/cash-sessions",
+        json={"openingCash": "500.00"},
+        headers=_headers(tenant, role=Role.OWNER),
+    )
+    assert opened.status_code == 201, opened.text
+    received = await client.post(
+        "/purchases/receive",
+        json=payload,
+        headers={**_headers(tenant, role=Role.INVENTORY_STAFF), "Idempotency-Key": "cash-received-00000000001"},
+    )
+    assert received.status_code == 201, received.text
+    current = await client.get("/cash-sessions/current", headers=_headers(tenant))
+    assert current.json()["data"]["cashOut"] == "25.00"
+
+
 # --- returns ----------------------------------------------------------------------
 
 

@@ -14,6 +14,7 @@ import {
 } from '@pharmacy/sales';
 import { money, multiply, type MoneyValue } from '@pharmacy/money';
 import { colors, spacing, tokens } from '@pharmacy/design-tokens';
+import { can } from '@pharmacy/permissions';
 import {
   buildGroupedShelfView,
   describeMedicineMatch,
@@ -36,6 +37,7 @@ import { CustomerCombobox } from '@/components/customer-combobox';
 import { IntakeDrawer } from '@/components/intake-drawer';
 import { MedicineFinder, type MedicineSelection } from '@/components/medicine-finder';
 import { ReceiptDialog } from '@/components/receipt-dialog';
+import { ReceiveWorkspace } from '@/components/receive-workspace';
 import { SalesHistoryDialog } from '@/components/sales-history-dialog';
 import { ShiftPanel } from '@/components/shift-panel';
 import { amountDueNow, calculateCheckout } from '@/lib/checkout';
@@ -56,6 +58,23 @@ const emptyQueue: SaleQueueStatus = { pending: 0, retrying: 0, stuck: [], nextRe
 const heldTabColors = ['#fdeccb', '#d4e7fa', '#e4dcf9', '#d2f0de', '#f9d9e6', '#e9e7d4'];
 
 export default function PosPage(): ReactNode {
+  const { user } = useSession();
+  const maySell = user !== null && can(user.role, 'sales.create');
+  const mayReceive = user !== null && can(user.role, 'purchases.receive');
+  const [mode, setMode] = useState<'sell' | 'receive'>(() => maySell ? 'sell' : 'receive');
+  useEffect(() => { if (!maySell && mayReceive) setMode('receive'); else if (!mayReceive && maySell) setMode('sell'); }, [mayReceive, maySell]);
+  const modeSwitch = <CounterModeSwitch mode={mode} maySell={maySell} mayReceive={mayReceive} onMode={setMode} />;
+  return <div className="pos-mode-shell">{mode === 'receive' ? <ReceiveWorkspace modeSwitch={modeSwitch} /> : <SellWorkspace modeSwitch={modeSwitch} />}</div>;
+}
+
+function CounterModeSwitch({ mode, maySell, mayReceive, onMode }: { mode: 'sell' | 'receive'; maySell: boolean; mayReceive: boolean; onMode: (mode: 'sell' | 'receive') => void }): ReactNode {
+  return <div className="pos-mode-switch pos-mode-switch--footer" role="tablist" aria-label="Counter mode">
+    {maySell && <button type="button" role="tab" aria-selected={mode === 'sell'} className={mode === 'sell' ? 'pos-mode-button pos-mode-button--active' : 'pos-mode-button'} onClick={() => onMode('sell')}><span>↑</span><strong>Sell</strong><small>To customers</small></button>}
+    {mayReceive && <button type="button" role="tab" aria-selected={mode === 'receive'} className={mode === 'receive' ? 'pos-mode-button pos-mode-button--active' : 'pos-mode-button'} onClick={() => onMode('receive')}><span>↓</span><strong>Receive</strong><small>From suppliers</small></button>}
+  </div>;
+}
+
+function SellWorkspace({ modeSwitch }: { modeSwitch: ReactNode }): ReactNode {
   const { user } = useSession();
   const queryClient = useQueryClient();
   const [stale, setStale] = useState<string | null>(null);
@@ -908,6 +927,7 @@ export default function PosPage(): ReactNode {
           </li>;
         })}
       </ul>}
+      {modeSwitch}
       <ShiftPanel onError={setError} />
     </nav>
     {confirmAction && <ConfirmDialog

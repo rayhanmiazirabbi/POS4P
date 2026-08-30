@@ -288,6 +288,8 @@ async def append_ledger_entry(
     reference_id: UUID | None = None,
     idempotency_key: str,
     note: str | None = None,
+    payment_method: str | None = None,
+    provider_reference: str | None = None,
     commit: bool = True,
     request_id: str = "unknown",
 ) -> SupplierLedgerEntry:
@@ -324,6 +326,8 @@ async def append_ledger_entry(
         reference_id=reference_id,
         idempotency_key=idempotency_key,
         note=note,
+        payment_method=payment_method,
+        provider_reference=provider_reference,
         created_at=utc_now(),
     )
     session.add(entry)
@@ -344,6 +348,7 @@ async def append_ledger_entry(
                 "supplier_id": str(supplier_id),
                 "entry_type": entry_type,
                 "amount": str(amount),
+                "payment_method": payment_method,
             }
         ),
     )

@@ -58,7 +58,7 @@ async def list_suppliers(
 async def create_supplier(
     payload: SupplierCreateRequest,
     session: SessionDep,
-    context: SupplierManagerDep,
+    context: Annotated[RequestContext, Depends(require_roles(Role.OWNER, Role.MANAGER, Role.CASHIER, Role.INVENTORY_STAFF))],
     request_id: RequestIdDep,
 ) -> Envelope[SupplierResponse]:
     supplier = await service.create_supplier(session, context, payload, request_id=request_id)

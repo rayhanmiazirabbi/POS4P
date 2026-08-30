@@ -72,6 +72,8 @@ class LedgerEntryResponse(ApiModel):
     reference_type: str | None
     reference_id: UUID | None
     note: str | None
+    payment_method: str | None
+    provider_reference: str | None
     created_at: datetime
 
 

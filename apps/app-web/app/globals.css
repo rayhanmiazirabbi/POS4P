@@ -367,6 +367,55 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .cash-drawer-toggle--open .cash-drawer-dot { background: var(--pos-accent); box-shadow: 0 0 0 3px rgba(7,138,77,.15); }
 .cash-drawer-toggle small { color: var(--pos-muted); font-weight: 650; }
 
+.pos-mode-shell { min-height: calc(100vh - 66px); }
+.pos-mode-switch { display: flex; width: max-content; margin: 0 auto -8px; padding: 4px; background: #e9efeb; border-radius: 12px; box-shadow: inset 0 0 0 1px rgba(23,33,28,.06); }
+.pos-mode-button { display: grid; grid-template-columns: 24px auto; grid-template-areas: "icon title" "icon detail"; align-items: center; column-gap: 7px; min-width: 132px; padding: 7px 12px; color: var(--pos-muted); text-align: left; background: transparent; border: 0; border-radius: 9px; cursor: pointer; transition: color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease; }
+.pos-mode-button > span { grid-area: icon; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; font-size: 15px; }
+.pos-mode-button strong { grid-area: title; color: inherit; font-size: 12px; }
+.pos-mode-button small { grid-area: detail; font-size: 10px; }
+.pos-mode-button:hover { color: var(--pos-ink); transform: translateY(-1px); }
+.pos-mode-button--active { color: var(--pos-accent); background: #fff; box-shadow: 0 2px 8px rgba(26,52,39,.09); }
+.pos-mode-button--active > span { color: #fff; background: var(--pos-accent); }
+.pos-mode-switch--footer { flex: 0 0 auto; align-self: center; margin: 0 0 0 auto; padding: 2px; border-radius: 9px; }
+.pos-mode-switch--footer + .cash-drawer-toggle { margin-left: 0; }
+.pos-mode-switch--footer .pos-mode-button { min-width: 108px; padding: 4px 8px; border-radius: 7px; }
+.pos-mode-switch--footer .pos-mode-button > span { width: 22px; height: 22px; }
+.receive-workspace { padding-top: 18px; }
+.receive-search-pane { position: relative; }
+.supplier-combobox { z-index: 20; }
+.receive-document-meta { display: grid; grid-template-columns: 1fr 160px; gap: 8px; }
+.receive-document-meta label { display: grid; gap: 5px; color: var(--pos-muted); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .03em; }
+.receive-compact-lines { overflow: visible; }
+.receive-adjustment-row { grid-template-columns: 42px minmax(0, 1fr) 108px minmax(132px, 150px) minmax(56px, auto) 36px 26px; grid-template-areas: "number details quantity discount total expiry remove"; animation: dialog-in .18s ease both; }
+.receive-cost-control { grid-template-columns: minmax(0, 1fr) 58px; }
+.receive-cost-control select, .receive-cost-control input { font-size: 11px; }
+.line-total--muted { color: var(--pos-muted); font-weight: 600; }
+.receive-line-tools { position: relative; grid-area: expiry; display: grid; place-items: center; }
+.line-calendar { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; color: var(--pos-muted); background: #fff; border: 1px solid var(--pos-line); border-radius: 8px; cursor: pointer; }
+.line-calendar:hover, .line-calendar--active { color: var(--pos-accent); background: var(--pos-accent-soft); border-color: #a9d5be; }
+.line-calendar .pos-icon { width: 16px; height: 16px; }
+.receive-detail-popover { position: absolute; z-index: 55; top: calc(100% + 7px); right: 0; display: grid; gap: 9px; width: 250px; padding: 12px; background: #fff; border: 1px solid var(--pos-line-strong); border-radius: 10px; box-shadow: var(--pos-shadow); animation: dialog-in .14s ease both; }
+.receive-detail-popover--above { top: auto; bottom: calc(100% + 7px); }
+.receive-detail-popover label { display: grid; gap: 5px; color: var(--pos-muted); font-size: 11px; font-weight: 700; }
+.receive-detail-popover .quiet-action { justify-self: end; }
+.receive-total-entry { grid-template-columns: minmax(100px, 1fr) auto; }
+.receive-total-entry .money-input { width: 150px; padding: 4px 8px; background: #fff; border: 1px solid var(--pos-line-strong); border-radius: 8px; }
+.receive-total-entry .money-input input { width: 104px; }
+.summary-row--warning { color: var(--pos-warning); }
+.receive-inline-error { margin: 0; }
+.receive-cart { padding-bottom: 20px; }
+.receive-held-tab { background: #d9eee4; }
+.purchase-receipt-item { display: grid !important; gap: 2px; }
+.purchase-receipt-item > small { color: var(--pos-muted); font-size: 9px; }
+.purchase-receipt-item .receipt-item-math { margin-top: 3px; }
+.receive-review { width: min(460px, calc(100vw - 28px)); }
+.receive-review dl { display: grid; margin: 0; }
+.receive-review dl div { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--pos-line); }
+.receive-review dt { color: var(--pos-muted); font-size: 11px; }
+.receive-review dd { margin: 0; font-weight: 750; }
+.receive-review > p { color: var(--pos-muted); font-size: 11px; line-height: 1.5; }
+.receive-review > footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 10px; }
+
 @keyframes drawer-in { from { opacity: .5; transform: translateX(28px); } }
 @keyframes backdrop-in { from { opacity: 0; } }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(.985); } }
@@ -418,6 +467,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .receipt-dialog-actions .primary-action { grid-column: 1 / -1; }
   .shortcut-grid { grid-template-columns: 92px 1fr; }
   .intake-drawer { padding: 18px; }
+  .pos-mode-shell { padding-top: 8px; }
+  .pos-mode-switch { margin-bottom: -2px; }
+  .pos-mode-switch--footer { margin: 0 0 0 auto; }
+  .pos-mode-switch--footer .pos-mode-button { grid-template-columns: 22px auto; grid-template-areas: "icon title"; min-width: 78px; }
+  .pos-mode-switch--footer .pos-mode-button small { display: none; }
+  .receive-workspace { padding-top: 14px; }
+  .receive-document-meta { grid-template-columns: 1fr; }
+  .receive-adjustment-row { grid-template-columns: 42px minmax(0, 1fr) 78px 36px 28px; grid-template-areas: "number details total expiry remove" ". quantity discount discount discount"; }
+  .receive-detail-popover { right: -34px; }
+  .held-strip-empty { display: none; }
 }
 
 @media (max-width: 440px) {
@@ -430,6 +489,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .summary-total strong { font-size: 20px; }
   .payment-methods { gap: 8px; }
   .tender-summary { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .pos-mode-button { min-width: 116px; padding-inline: 9px; }
+  .pos-mode-switch--footer .pos-mode-button { min-width: 56px; padding-inline: 5px; }
+  .pos-mode-switch--footer .pos-mode-button > span { display: none; }
+  .receive-adjustment-row { grid-template-columns: 36px minmax(0, 1fr) 64px 32px 24px; grid-template-areas: "number details total expiry remove" ". quantity quantity quantity quantity" ". discount discount discount discount"; }
+  .receive-detail-popover { position: fixed; top: auto; right: 12px; bottom: 62px; left: 12px; width: auto; }
+  .held-strip-label { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

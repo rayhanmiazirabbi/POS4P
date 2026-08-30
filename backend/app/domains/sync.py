@@ -82,6 +82,8 @@ class StoreSequence(Base):
     last_sequence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     #: Customer-facing receipt numbering; must stay gapless.
     last_receipt_sequence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    #: Supplier-facing goods-received voucher numbering; independent from sales.
+    last_grn_sequence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
 
 class SyncFeedItem(StoreScopedMixin, UUIDPrimaryKeyMixin, Base):

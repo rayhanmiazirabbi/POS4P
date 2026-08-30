@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.context import RequestContext
 from app.domains.cash import CashSession, CashSessionStatus
 from app.domains.payments import Payment, PaymentMethod, PaymentRefund, PaymentStatus
+from app.domains.suppliers import SupplierLedgerEntry
 from app.errors import Conflict, Forbidden, NotFound
 from app.models import Role, User
 from app.schemas.cash import CashSessionResponse
@@ -113,7 +114,7 @@ async def cash_flow(
             Payment.created_at < end,
         )
     )
-    cash_out = await session.scalar(
+    refund_cash_out = await session.scalar(
         select(func.coalesce(func.sum(PaymentRefund.amount), 0))
         .select_from(PaymentRefund)
         .join(Payment, Payment.id == PaymentRefund.payment_id)
@@ -124,9 +125,18 @@ async def cash_flow(
             PaymentRefund.created_at < end,
         )
     )
+    supplier_cash_out = await session.scalar(
+        select(func.coalesce(func.sum(-SupplierLedgerEntry.amount), 0)).where(
+            SupplierLedgerEntry.store_id == store_id,
+            SupplierLedgerEntry.entry_type == "payment",
+            SupplierLedgerEntry.payment_method == PaymentMethod.CASH.value,
+            SupplierLedgerEntry.created_at >= start,
+            SupplierLedgerEntry.created_at < end,
+        )
+    )
     return (
         Decimal(cash_in or 0).quantize(CENT),
-        Decimal(cash_out or 0).quantize(CENT),
+        (Decimal(refund_cash_out or 0) + Decimal(supplier_cash_out or 0)).quantize(CENT),
     )
 
 

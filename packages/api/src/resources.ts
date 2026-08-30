@@ -1369,7 +1369,7 @@ export function createInventoryClient(client: ApiClient): InventoryClient {
 }
 
 export type PurchaseStatus = 'draft' | 'confirmed' | 'returned';
-export type PurchaseItem = { id: string; purchaseId: string; storeProductId: string; quantity: string; batchNumber: string; expiryDate?: string | null; unitCost?: string | null };
+export type PurchaseItem = { id: string; purchaseId: string; storeProductId: string; quantity: string; batchNumber: string; expiryDate?: string | null; unitCost?: string | null; lineTotal?: string | null };
 export type Purchase = {
   id: string;
   organizationId: string;
@@ -1377,6 +1377,7 @@ export type Purchase = {
   supplierId: string;
   status: PurchaseStatus;
   invoiceNumber?: string | null;
+  receiptNumber?: string | null;
   note?: string | null;
   purchasedAt: string;
   confirmedAt?: string | null;
@@ -1391,11 +1392,48 @@ export type PurchaseCreateRequest = {
   items: readonly { storeProductId: string; quantity: string; unitCost: string; batchNumber: string; expiryDate?: string }[];
 };
 
+export type ReceiveProductIdentity =
+  | { storeProductId: string }
+  | { pharmacyProductId: string }
+  | { catalogProductId: string }
+  | { customProduct: { name: string; unit: string; barcode?: string } };
+export type PurchaseReceiveLine = ReceiveProductIdentity & {
+  shelf?: { salePrice?: string; sku?: string; barcode?: string; rack?: string; minimumStock?: string };
+  quantity: string;
+  unitCost?: string;
+  lineTotal?: string;
+  batchNumber?: string;
+  expiryDate?: string;
+};
+export type PurchaseReceivePayment = { method: string; amount: string; providerReference?: string };
+export type PurchaseReceiveRequest = {
+  supplierId: string;
+  invoiceNumber?: string;
+  note?: string;
+  purchasedAt?: string;
+  totalAmount?: string;
+  items: readonly PurchaseReceiveLine[];
+  payments?: readonly PurchaseReceivePayment[];
+};
+export type PurchaseReceiptLine = {
+  purchaseItemId: string; storeProductId: string; name: string; sku: string; unit: string;
+  quantity: string; unitCost: string; lineTotal: string; batchNumber: string; expiryDate?: string | null;
+};
+export type PurchaseReceiptPayment = { method: string; amount: string; providerReference?: string | null };
+export type PurchaseReceipt = {
+  purchaseId: string; receiptNumber: string; supplierId: string; supplierName: string;
+  invoiceNumber?: string | null; purchasedAt: string; confirmedAt: string; totalAmount: string;
+  paidAmount: string; creditAmount: string; supplierBalanceAfter: string;
+  lines: readonly PurchaseReceiptLine[]; payments: readonly PurchaseReceiptPayment[];
+};
+
 export type PurchasesClient = {
   list(pagination?: Pagination, options?: RequestOptions): Promise<Page<Purchase>>;
   read(purchaseId: string, options?: RequestOptions): Promise<ApiResponse<Purchase>>;
   create(body: PurchaseCreateRequest, options?: RequestOptions): Promise<ApiResponse<Purchase>>;
   confirm(purchaseId: string, options?: RequestOptions): Promise<ApiResponse<Purchase>>;
+  receive(body: PurchaseReceiveRequest, options?: RequestOptions): Promise<ApiResponse<PurchaseReceipt>>;
+  receipt(purchaseId: string, options?: RequestOptions): Promise<ApiResponse<PurchaseReceipt>>;
 };
 
 export function createPurchasesClient(client: ApiClient): PurchasesClient {
@@ -1404,6 +1442,8 @@ export function createPurchasesClient(client: ApiClient): PurchasesClient {
     read: (purchaseId, options = {}) => client.get<Purchase>(`/purchases/${segment(purchaseId)}`, options),
     create: (body, options = {}) => client.post<Purchase>('/purchases', body, options),
     confirm: (purchaseId, options = {}) => client.post<Purchase>(`/purchases/${segment(purchaseId)}/confirm`, undefined, options),
+    receive: (body, options = {}) => client.post<PurchaseReceipt>('/purchases/receive', body, options),
+    receipt: (purchaseId, options = {}) => client.get<PurchaseReceipt>(`/purchases/${segment(purchaseId)}/receipt`, options),
   };
 }
 

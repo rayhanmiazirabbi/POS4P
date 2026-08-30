@@ -4,6 +4,7 @@ import type { Role, StoreMembership } from '@pharmacy/types';
 export type Capability =
   | 'organization.manage' | 'store.manage' | 'users.manage' | 'sales.create'
   | 'sales.refund' | 'inventory.read' | 'inventory.adjust' | 'purchases.manage'
+  | 'purchases.receive'
   | 'purchasing.orders.manage' | 'catalogue.search' | 'products.adopt'
   | 'reports.read' | 'reports.read_costs';
 
@@ -26,10 +27,10 @@ export type Capability =
  * `store.manage`) stops at owner/manager, matching the server.
  */
 const matrix: Record<Role, readonly Capability[]> = {
-  owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
-  manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
-  cashier: ['sales.create', 'inventory.read', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
-  inventory_staff: ['inventory.read', 'inventory.adjust', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
+  owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchases.receive', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
+  manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchases.receive', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
+  cashier: ['sales.create', 'inventory.read', 'purchases.receive', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
+  inventory_staff: ['inventory.read', 'inventory.adjust', 'purchases.receive', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
 };
 
 export function can(role: Role, capability: Capability): boolean { return matrix[role]?.includes(capability) ?? false; }

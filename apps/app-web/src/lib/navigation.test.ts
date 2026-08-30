@@ -35,13 +35,9 @@ describe('navigation by role', () => {
     expect(mayVisit('cashier', '/settings')).toBe(false);
   });
 
-  it('keeps inventory staff off the counter but on orders and the catalogue', () => {
-    // No `sales.create`: the server refuses every sale from this role, so offering
-    // the till would only produce a screen that cannot complete its one action.
-    // Purchase orders are paperwork every store role writes; converting them into
-    // a cost-bearing purchase stays manager+ inside the page.
-    expect(hrefs('inventory_staff')).toEqual(['/dashboard', '/catalogue', '/inventory', '/purchasing']);
-    expect(mayVisit('inventory_staff', '/pos')).toBe(false);
+  it('opens the counter in receive-only mode for inventory staff', () => {
+    expect(hrefs('inventory_staff')).toEqual(['/pos', '/dashboard', '/catalogue', '/inventory', '/purchasing']);
+    expect(mayVisit('inventory_staff', '/pos')).toBe(true);
     expect(mayVisit('inventory_staff', '/purchasing')).toBe(true);
   });
 
@@ -54,7 +50,7 @@ describe('navigation by role', () => {
       expect(mayVisit(role, landing as string), role).toBe(true);
     }
     expect(landingRoute('cashier')).toBe('/pos');
-    expect(landingRoute('inventory_staff')).toBe('/dashboard');
+    expect(landingRoute('inventory_staff')).toBe('/pos');
   });
 
   it('treats an unknown route and an unknown role as denied', () => {

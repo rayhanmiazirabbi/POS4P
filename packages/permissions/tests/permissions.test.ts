@@ -9,16 +9,16 @@ import {
 const ROLES: Role[] = ['owner', 'manager', 'cashier', 'inventory_staff'];
 const CAPABILITIES: Capability[] = [
   'organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund',
-  'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage',
+  'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchases.receive', 'purchasing.orders.manage',
   'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs',
 ];
 
 /** The full role × capability expectation, pinned so a matrix edit is a deliberate act. */
 const EXPECTED: Record<Role, readonly Capability[]> = {
-  owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
-  manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
-  cashier: ['sales.create', 'inventory.read', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
-  inventory_staff: ['inventory.read', 'inventory.adjust', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
+  owner: ['organization.manage', 'store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchases.receive', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
+  manager: ['store.manage', 'users.manage', 'sales.create', 'sales.refund', 'inventory.read', 'inventory.adjust', 'purchases.manage', 'purchases.receive', 'purchasing.orders.manage', 'catalogue.search', 'products.adopt', 'reports.read', 'reports.read_costs'],
+  cashier: ['sales.create', 'inventory.read', 'purchases.receive', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
+  inventory_staff: ['inventory.read', 'inventory.adjust', 'purchases.receive', 'purchasing.orders.manage', 'catalogue.search', 'reports.read'],
 };
 
 describe('role × capability matrix', () => {
@@ -67,6 +67,7 @@ describe('role × capability matrix', () => {
     // unable to do the work it is named for.
     expect(can('inventory_staff', 'inventory.adjust')).toBe(true);
     expect(can('inventory_staff', 'purchases.manage')).toBe(false);
+    for (const role of ROLES) expect(can(role, 'purchases.receive'), role).toBe(true);
   });
 });
 
