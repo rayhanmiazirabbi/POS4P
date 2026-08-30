@@ -33,6 +33,7 @@ class PurchaseCreateRequest(ApiModel):
 class PurchaseItemResponse(ApiModel):
     id: UUID
     purchase_id: UUID
+    purchase_order_item_id: UUID | None = None
     store_product_id: UUID
     quantity: Decimal
     batch_number: str
@@ -46,6 +47,8 @@ class PurchaseResponse(ApiModel):
     organization_id: UUID
     store_id: UUID
     supplier_id: UUID
+    supplier_name: str | None = None
+    purchase_order_id: UUID | None = None
     status: PurchaseStatus
     invoice_number: str | None
     receipt_number: str | None
@@ -53,6 +56,7 @@ class PurchaseResponse(ApiModel):
     purchased_at: date
     confirmed_at: datetime | None
     total_amount: Decimal | None = None
+    item_count: int = 0
     items: list[PurchaseItemResponse] = Field(default_factory=list)
 
 
@@ -71,6 +75,7 @@ class ReceiveShelf(ApiModel):
 
 
 class PurchaseReceiveItem(ApiModel):
+    purchase_order_item_id: UUID | None = None
     store_product_id: UUID | None = None
     pharmacy_product_id: UUID | None = None
     catalog_product_id: UUID | None = None
@@ -99,6 +104,7 @@ class PurchaseReceivePayment(ApiModel):
 
 
 class PurchaseReceiveRequest(ApiModel):
+    purchase_order_id: UUID | None = None
     supplier_id: UUID
     invoice_number: Annotated[str | None, Field(max_length=100)] = None
     note: Annotated[str | None, Field(max_length=2000)] = None
@@ -128,6 +134,7 @@ class PurchaseReceiveRequest(ApiModel):
 
 class PurchaseReceiptLine(ApiModel):
     purchase_item_id: UUID
+    purchase_order_item_id: UUID | None = None
     store_product_id: UUID
     name: str
     sku: str
@@ -147,6 +154,7 @@ class PurchaseReceiptPayment(ApiModel):
 
 class PurchaseReceiptResponse(ApiModel):
     purchase_id: UUID
+    purchase_order_id: UUID | None = None
     receipt_number: str
     supplier_id: UUID
     supplier_name: str

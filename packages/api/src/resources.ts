@@ -878,7 +878,7 @@ export type ValuationLine = {
   onHand: string;
   valueAtCost: string;
 };
-export type InventoryValuation = { storeId: string; totalValueAtCost: string; items: readonly ValuationLine[] };
+export type InventoryValuation = { storeId: string; totalValueAtCost: string; lines: readonly ValuationLine[] };
 export type DeadStockLine = {
   storeProductId: string;
   sku: string;
@@ -887,7 +887,7 @@ export type DeadStockLine = {
   valueAtCost: string;
   lastSoldAt?: string | null;
 };
-export type DeadStockReport = { storeId: string; idleDays: number; totalValueAtCost: string; items: readonly DeadStockLine[] };
+export type DeadStockReport = { storeId: string; idleDays: number; totalValueAtCost: string; lines: readonly DeadStockLine[] };
 export type CogsSummary = { storeId: string; start: string; end: string; costOfGoodsSold: string };
 
 export type SyncDevice = { id: string; storeId: string; name: string; deviceKey: string; status: DeviceStatus; createdAt: string };
@@ -985,7 +985,7 @@ export type MovementLedgerRow = {
 };
 export type RackSummary = { rack: string; itemCount: number };
 export type RackRenameRequest = { storeId: string; fromRack: string; toRack: string };
-export type ReorderSuggestion = { storeProductId: string; sku: string; productName: string; available: string; minimumStock: string; suggestedQuantity: string };
+export type ReorderSuggestion = { storeProductId: string; pharmacyProductId: string; sku: string; productName: string; available: string; minimumStock: string; suggestedQuantity: string };
 export type StocktakeStatus = 'draft' | 'completed';
 export type StocktakeLine = {
   storeProductId: string;
@@ -1206,7 +1206,7 @@ export type CatalogProductRecord = {
   createdAt: string;
 };
 
-export type PurchaseOrderStatusWire = 'draft' | 'ordered' | 'closed' | 'cancelled';
+export type PurchaseOrderStatusWire = 'draft' | 'ordered' | 'partially_received' | 'received' | 'closed' | 'cancelled';
 
 /** Owner/manager reference data behind the manual catalogue-entry form. */
 export function createCatalogClient(client: ApiClient): CatalogClient {
@@ -1226,6 +1226,8 @@ export type PurchaseOrderItem = {
   name: string;
   quantity: string;
   estUnitCost?: string | null;
+  receivedQuantity: string;
+  remainingQuantity: string;
 };
 
 /** Mirrors `PurchaseOrderResponse`. */
@@ -1234,6 +1236,7 @@ export type PurchaseOrder = {
   organizationId: string;
   storeId: string;
   supplierId?: string | null;
+  supplierName?: string | null;
   status: PurchaseOrderStatusWire;
   expectedAt?: string | null;
   note?: string | null;
@@ -1241,6 +1244,9 @@ export type PurchaseOrder = {
   closedAt?: string | null;
   cancelledAt?: string | null;
   createdAt: string;
+  itemCount: number;
+  orderedQuantity: string;
+  receivedQuantity: string;
   items: readonly PurchaseOrderItem[];
 };
 
@@ -1259,7 +1265,7 @@ export type PurchaseOrderItemAddRequest = {
   pharmacyProductId?: string;
 };
 
-export type PurchaseOrderItemUpdateRequest = { name?: string; quantity?: string; estUnitCost?: string };
+export type PurchaseOrderItemUpdateRequest = { name?: string; quantity?: string; estUnitCost?: string | null };
 
 export type PoConvertResult = {
   purchaseId: string;
@@ -1368,13 +1374,15 @@ export function createInventoryClient(client: ApiClient): InventoryClient {
   };
 }
 
-export type PurchaseStatus = 'draft' | 'confirmed' | 'returned';
-export type PurchaseItem = { id: string; purchaseId: string; storeProductId: string; quantity: string; batchNumber: string; expiryDate?: string | null; unitCost?: string | null; lineTotal?: string | null };
+export type PurchaseStatus = 'draft' | 'confirmed' | 'cancelled' | 'returned';
+export type PurchaseItem = { id: string; purchaseId: string; purchaseOrderItemId?: string | null; storeProductId: string; quantity: string; batchNumber: string; expiryDate?: string | null; unitCost?: string | null; lineTotal?: string | null };
 export type Purchase = {
   id: string;
   organizationId: string;
   storeId: string;
   supplierId: string;
+  supplierName?: string | null;
+  purchaseOrderId?: string | null;
   status: PurchaseStatus;
   invoiceNumber?: string | null;
   receiptNumber?: string | null;
@@ -1382,6 +1390,7 @@ export type Purchase = {
   purchasedAt: string;
   confirmedAt?: string | null;
   totalAmount?: string | null;
+  itemCount: number;
   items: readonly PurchaseItem[];
 };
 export type PurchaseCreateRequest = {
@@ -1398,6 +1407,7 @@ export type ReceiveProductIdentity =
   | { catalogProductId: string }
   | { customProduct: { name: string; unit: string; barcode?: string } };
 export type PurchaseReceiveLine = ReceiveProductIdentity & {
+  purchaseOrderItemId?: string;
   shelf?: { salePrice?: string; sku?: string; barcode?: string; rack?: string; minimumStock?: string };
   quantity: string;
   unitCost?: string;
@@ -1407,6 +1417,7 @@ export type PurchaseReceiveLine = ReceiveProductIdentity & {
 };
 export type PurchaseReceivePayment = { method: string; amount: string; providerReference?: string };
 export type PurchaseReceiveRequest = {
+  purchaseOrderId?: string;
   supplierId: string;
   invoiceNumber?: string;
   note?: string;
@@ -1416,19 +1427,19 @@ export type PurchaseReceiveRequest = {
   payments?: readonly PurchaseReceivePayment[];
 };
 export type PurchaseReceiptLine = {
-  purchaseItemId: string; storeProductId: string; name: string; sku: string; unit: string;
+  purchaseItemId: string; purchaseOrderItemId?: string | null; storeProductId: string; name: string; sku: string; unit: string;
   quantity: string; unitCost: string; lineTotal: string; batchNumber: string; expiryDate?: string | null;
 };
 export type PurchaseReceiptPayment = { method: string; amount: string; providerReference?: string | null };
 export type PurchaseReceipt = {
-  purchaseId: string; receiptNumber: string; supplierId: string; supplierName: string;
+  purchaseId: string; purchaseOrderId?: string | null; receiptNumber: string; supplierId: string; supplierName: string;
   invoiceNumber?: string | null; purchasedAt: string; confirmedAt: string; totalAmount: string;
   paidAmount: string; creditAmount: string; supplierBalanceAfter: string;
   lines: readonly PurchaseReceiptLine[]; payments: readonly PurchaseReceiptPayment[];
 };
 
 export type PurchasesClient = {
-  list(pagination?: Pagination, options?: RequestOptions): Promise<Page<Purchase>>;
+  list(filters?: { status?: PurchaseStatus; supplierId?: string; purchasedFrom?: string; purchasedTo?: string }, pagination?: Pagination, options?: RequestOptions): Promise<Page<Purchase>>;
   read(purchaseId: string, options?: RequestOptions): Promise<ApiResponse<Purchase>>;
   create(body: PurchaseCreateRequest, options?: RequestOptions): Promise<ApiResponse<Purchase>>;
   confirm(purchaseId: string, options?: RequestOptions): Promise<ApiResponse<Purchase>>;
@@ -1438,7 +1449,8 @@ export type PurchasesClient = {
 
 export function createPurchasesClient(client: ApiClient): PurchasesClient {
   return {
-    list: (pagination = {}, options = {}) => client.list<Purchase>('/purchases', pagination, options),
+    list: ({ status, supplierId, purchasedFrom, purchasedTo } = {}, pagination = {}, options = {}) =>
+      client.list<Purchase>('/purchases', pagination, { ...options, query: { ...options.query, status, supplierId, purchasedFrom, purchasedTo } }),
     read: (purchaseId, options = {}) => client.get<Purchase>(`/purchases/${segment(purchaseId)}`, options),
     create: (body, options = {}) => client.post<Purchase>('/purchases', body, options),
     confirm: (purchaseId, options = {}) => client.post<Purchase>(`/purchases/${segment(purchaseId)}/confirm`, undefined, options),

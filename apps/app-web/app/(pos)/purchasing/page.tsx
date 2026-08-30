@@ -1,548 +1,227 @@
 'use client';
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Purchase, PurchaseOrder, PurchaseOrderStatusWire, ShelfItem, Supplier } from '@pharmacy/api';
-import { colors, spacing, tokens } from '@pharmacy/design-tokens';
+import type { Purchase, PurchaseOrder, PurchaseOrderItem, PurchaseOrderStatusWire, ReorderSuggestion, ShelfItem, Supplier } from '@pharmacy/api';
 import { can } from '@pharmacy/permissions';
-import { useState, type CSSProperties, type ReactNode } from 'react';
-import { z } from 'zod';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 
+import { MedicineFinder, type MedicineSelection } from '@/components/medicine-finder';
+import { PurchaseReceiptDialog, type PrintablePurchaseReceipt } from '@/components/purchase-receipt-dialog';
 import { pharmacyApi } from '@/lib/api';
-import { useSession } from '@/lib/session';
 import { decimalEntry } from '@/lib/numeric-input';
-import { decimalAmount, fieldIssue, positiveQuantity } from '@/lib/validation';
+import { orderProgress, purchasingView, quantityText, statusLabel, type PurchasingView } from '@/lib/purchasing';
+import { defaultReceiptConfig } from '@/lib/receipt';
+import { useSession } from '@/lib/session';
 
-const card: CSSProperties = { background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: 12, padding: spacing.lg };
-const input: CSSProperties = { padding: spacing.sm, borderRadius: 8, border: `1px solid ${colors.border}` };
-const button: CSSProperties = { ...input, cursor: 'pointer', background: colors.primary, color: colors.primaryForeground, border: 'none', fontWeight: tokens.typography.weights.medium };
-const quietButton: CSSProperties = { ...input, cursor: 'pointer', background: colors.surface };
+const orderStatuses: readonly PurchaseOrderStatusWire[] = ['draft', 'ordered', 'partially_received', 'received', 'closed', 'cancelled'];
+type OrderDraftLine = { id: string; name: string; quantity: string; estUnitCost: string; pharmacyProductId?: string; catalogProductId?: string };
 
-type DraftLine = { storeProductId: string; quantity: string; unitCost: string; batchNumber: string; expiryDate: string };
-
-const emptyLine: DraftLine = { storeProductId: '', quantity: '', unitCost: '', batchNumber: '', expiryDate: '' };
-
-/**
- * A shelf row as a person recognises it.
- *
- * `GET /products/current` now returns the product name alongside the shelf row, so
- * these lists no longer have to identify a medicine by SKU alone. Receiving a batch
- * against the wrong line is a stock correction and a wasted delivery, and `PARA-500`
- * versus `PARA-650` in a dropdown is exactly the confusion that causes it.
- */
-function shelfLabel(row: ShelfItem): string {
-  return `${row.name} · ${row.sku}`;
+function key(): string { return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+function message(cause: unknown, fallback: string): string { return cause instanceof Error ? cause.message : fallback; }
+function OverlayPortal({ children }: { children: ReactNode }): ReactNode {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  return mounted ? createPortal(children, document.body) : null;
 }
-
-/** A draft needs its supplier and at least one complete line: what to buy, how
- *  much, and at what cost. Confirmed purchases book batches, so a line missing
- *  any of those would only fail later, further from the person who typed it. */
-const draftLineSchema = z.object({
-  storeProductId: z.string().min(1),
-  quantity: positiveQuantity,
-  unitCost: decimalAmount,
-  batchNumber: z.string().trim().min(1),
-});
-
-const PO_STATUSES: readonly PurchaseOrderStatusWire[] = ['draft', 'ordered', 'closed', 'cancelled'];
-
-function orderLabel(order: PurchaseOrder): string {
-  return `Draft ${order.id.slice(0, 8)} · ${order.items.length} line${order.items.length === 1 ? '' : 's'}`;
+function restoreFocus(target: HTMLButtonElement | null): void { window.setTimeout(() => target?.focus(), 0); }
+function useDialogFocus(panelRef: RefObject<HTMLElement | null>): void {
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (panel === null) return;
+    const selector = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])';
+    (panel.querySelector<HTMLElement>(selector) ?? panel).focus();
+    function trapTab(event: KeyboardEvent): void {
+      if (event.key !== 'Tab') return;
+      const controls = Array.from(panel!.querySelectorAll<HTMLElement>(selector)).filter((node) => node.getAttribute('aria-hidden') !== 'true');
+      if (controls.length === 0) { event.preventDefault(); panel!.focus(); return; }
+      const first = controls[0]!; const last = controls.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    panel.addEventListener('keydown', trapTab);
+    return () => panel.removeEventListener('keydown', trapTab);
+  }, [panelRef]);
 }
 
 export default function PurchasingPage(): ReactNode {
-  const { user } = useSession();
-  const role = user?.role ?? null;
-  const mayManagePurchases = role !== null && can(role, 'purchases.manage');
-
-  return (
-    <main className="split-grid split-grid--wide purchasing-page">
-      <PurchaseOrdersSection mayManagePurchases={mayManagePurchases} />
-      {mayManagePurchases ? <PurchasesSection /> : null}
-    </main>
-  );
+  return <Suspense fallback={<main className="page-shell"><p className="status-message status-message--muted">Loading purchasing workspace…</p></main>}><PurchasingWorkspace /></Suspense>;
 }
 
-/**
- * What to buy next, straight off the shelf minimums.
- *
- * The suggestion endpoint refills to twice the minimum, so accepting it clears
- * the shortage and leaves a working buffer rather than landing the branch back
- * at the minimum the following week. One click turns the list into a draft
- * purchase order; costs and batches are entered when the goods actually arrive.
- */
-function ReorderPanel({ onDraftCreated }: { onDraftCreated: (orderId: string) => void }): ReactNode {
+function PurchasingWorkspace(): ReactNode {
   const { user } = useSession();
-  const queryClient = useQueryClient();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const view = purchasingView(searchParams.get('view'));
+  const [newOrderOpen, setNewOrderOpen] = useState(false);
+  const newOrderTriggerRef = useRef<HTMLButtonElement>(null);
   const storeId = user?.storeId ?? null;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  const mayManagePurchases = user !== null && can(user.role, 'purchases.manage');
+  const suppliersQuery = useQuery({ queryKey: ['purchasing', 'suppliers'], queryFn: async () => (await pharmacyApi.suppliers.list({ limit: 100 })).items, staleTime: 60_000 });
+  const shelfQuery = useQuery({ queryKey: ['purchasing', 'shelf', storeId], enabled: storeId !== null, queryFn: async () => (await pharmacyApi.products.listCurrentStoreProducts()).items, staleTime: 30_000 });
 
-  const suggestions = useQuery({
-    queryKey: ['inventory', 'reorder', storeId],
-    enabled: storeId !== null,
-    queryFn: async () => (await pharmacyApi.inventory.reorderSuggestions(storeId as string)).data,
-    staleTime: 30_000,
-  });
-  const items = suggestions.data ?? [];
-
-  async function createDraft(): Promise<void> {
-    if (storeId === null || items.length === 0) return;
-    setBusy(true);
-    setError(null);
-    setNote(null);
-    try {
-      const created = await pharmacyApi.purchaseOrders.create({ note: 'From reorder suggestions' });
-      const orderId = created.data.id;
-      for (const item of items) {
-        await pharmacyApi.purchaseOrders.addItem(orderId, {
-          name: item.productName,
-          quantity: item.suggestedQuantity,
-        });
-      }
-      setNote(`Draft ${orderId.slice(0, 8)} created with ${items.length} line${items.length === 1 ? '' : 's'}.`);
-      await queryClient.invalidateQueries({ queryKey: ['purchasing', 'purchase-orders'] });
-      onDraftCreated(orderId);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The draft could not be created');
-    } finally {
-      setBusy(false);
-    }
+  function selectView(next: PurchasingView): void {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next !== view) ['q', 'status', 'supplier', 'from', 'to'].forEach((name) => params.delete(name));
+    if (next === 'replenishment') params.delete('view'); else params.set('view', next);
+    router.replace(`${pathname}${params.size ? `?${params.toString()}` : ''}`, { scroll: false });
   }
-
-  return (
-    <section className="surface" style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
-      <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Reorder suggestions ({items.length})</h2>
-      {suggestions.isError && (
-        <p role="alert" style={{ margin: 0, color: colors.danger }}>
-          {suggestions.error instanceof Error ? suggestions.error.message : 'Could not load suggestions'}
-        </p>
-      )}
-      {suggestions.isPending && <p style={{ margin: 0, color: colors.muted }}>Loading…</p>}
-      {!suggestions.isPending && items.length === 0 && (
-        <p style={{ margin: 0, color: colors.muted }}>Nothing is under its minimum. No order needed.</p>
-      )}
-      {items.length > 0 && (
-        <>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: tokens.typography.sizes.sm }}>
-            <thead><tr style={{ textAlign: 'left', color: colors.muted }}><th>Medicine</th><th>Available</th><th>Minimum</th><th>Order</th></tr></thead>
-            <tbody>{items.map((item) => (
-              <tr key={item.storeProductId} style={{ borderTop: `1px solid ${colors.border}` }}>
-                <td style={{ padding: `${spacing.xs} 0` }}>{item.productName}<br /><span style={{ color: colors.muted }}>{item.sku}</span></td>
-                <td style={{ color: colors.warning }}>{item.available}</td>
-                <td>{item.minimumStock}</td>
-                <td><strong>{item.suggestedQuantity}</strong></td>
-              </tr>
-            ))}</tbody>
-          </table>
-          <button type="button" className="primary-action" disabled={busy} onClick={() => void createDraft()}>
-            {busy ? 'Building draft…' : `Create draft order (${items.length} lines)`}
-          </button>
-        </>
-      )}
-      {note && <p role="status" style={{ margin: 0, color: colors.success }}>{note}</p>}
-      {error && <p role="alert" className="form-error" style={{ margin: 0 }}>{error}</p>}
-    </section>
-  );
+  if (storeId === null) return <main className="page-shell"><p className="status-message status-message--error">Choose a branch before managing purchasing.</p></main>;
+  const suppliers = (suppliersQuery.data ?? []).filter((supplier) => supplier.status === 'active');
+  const shelf = shelfQuery.data ?? [];
+  return <>
+    <main className="page-shell purchasing-workspace">
+      <header className="page-heading purchasing-heading"><div><span className="eyebrow">Inbound stock</span><h1>Purchasing</h1><p>Plan replenishment, follow orders, and review supplier receipts.</p></div><button ref={newOrderTriggerRef} type="button" className="primary-action" onClick={() => setNewOrderOpen(true)}>New order</button></header>
+      <nav className="workspace-tabs" aria-label="Purchasing views">
+        <button type="button" aria-current={view === 'replenishment' ? 'page' : undefined} onClick={() => selectView('replenishment')}>Replenishment</button>
+        <button type="button" aria-current={view === 'orders' ? 'page' : undefined} onClick={() => selectView('orders')}>Orders</button>
+        <button type="button" aria-current={view === 'history' ? 'page' : undefined} onClick={() => selectView('history')}>Purchase history</button>
+      </nav>
+      {view === 'replenishment' && <ReplenishmentView storeId={storeId} suppliers={suppliers} onCreated={() => selectView('orders')} />}
+      {view === 'orders' && <OrdersView suppliers={suppliers} shelf={shelf} />}
+      {view === 'history' && <HistoryView suppliers={suppliers} mayManagePurchases={mayManagePurchases} />}
+    </main>
+    {newOrderOpen && <OverlayPortal><NewOrderDrawer suppliers={suppliers} shelf={shelf} onClose={() => { setNewOrderOpen(false); restoreFocus(newOrderTriggerRef.current); }} onCreated={() => { setNewOrderOpen(false); selectView('orders'); restoreFocus(newOrderTriggerRef.current); }} /></OverlayPortal>}
+  </>;
 }
 
-function PurchaseOrdersSection({ mayManagePurchases }: { mayManagePurchases: boolean }): ReactNode {
+function ReplenishmentView({ storeId, suppliers, onCreated }: { storeId: string; suppliers: readonly Supplier[]; onCreated: () => void }): ReactNode {
   const queryClient = useQueryClient();
-  const [statusFilter, setStatusFilter] = useState<PurchaseOrderStatusWire | ''>('');
-  const [selectedId, setSelectedId] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
-  const [skippedLines, setSkippedLines] = useState<readonly string[]>([]);
-  const [busy, setBusy] = useState(false);
-
-  // New-order dialog state.
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [quantities, setQuantities] = useState<Record<string, string>>({});
   const [supplierId, setSupplierId] = useState('');
   const [expectedAt, setExpectedAt] = useState('');
-  const [orderNote, setOrderNote] = useState('');
-
-  // Detail editor state.
-  const detail = useQuery({
-    queryKey: ['purchasing', 'purchase-order', selectedId],
-    queryFn: async () => (await pharmacyApi.purchaseOrders.read(selectedId)).data,
-    enabled: selectedId !== '',
-  });
-  const [newLineName, setNewLineName] = useState('');
-  const [newLineQty, setNewLineQty] = useState('10');
-  const [newLineCost, setNewLineCost] = useState('');
-  const [convertSupplierId, setConvertSupplierId] = useState('');
-
-  const ordersQuery = useQuery({
-    queryKey: ['purchasing', 'purchase-orders', statusFilter],
-    queryFn: async () =>
-      (
-        await pharmacyApi.purchaseOrders.list(
-          statusFilter === '' ? {} : { status: statusFilter },
-          { limit: 50 },
-        )
-      ).items,
-    staleTime: 15_000,
-  });
-  const suppliersQuery = useQuery({
-    queryKey: ['purchasing', 'suppliers'],
-    queryFn: async () => (await pharmacyApi.suppliers.list({ limit: 100 })).items,
-    staleTime: 60_000,
-  });
-  const suppliers = suppliersQuery.data ?? [];
-
-  function resetFeedback(): void {
-    setError(null);
-    setNote(null);
-    setSkippedLines([]);
-  }
-
-  async function invalidate(): Promise<void> {
-    await queryClient.invalidateQueries({ queryKey: ['purchasing', 'purchase-orders'] });
-  }
-
-  async function run(action: () => Promise<void>): Promise<void> {
-    resetFeedback();
-    setBusy(true);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ kind: 'error' | 'note'; text: string } | null>(null);
+  const query = useQuery({ queryKey: ['inventory', 'reorder', storeId], queryFn: async () => (await pharmacyApi.inventory.reorderSuggestions(storeId)).data, staleTime: 30_000 });
+  const items = query.data ?? [];
+  useEffect(() => {
+    if (items.length === 0) return;
+    setSelected((current) => current.size === 0 ? new Set(items.map((item) => item.storeProductId)) : current);
+    setQuantities((current) => Object.fromEntries(items.map((item) => [item.storeProductId, current[item.storeProductId] ?? item.suggestedQuantity])));
+  }, [items]);
+  const shown = useMemo(() => { const term = search.trim().toLowerCase(); return term === '' ? items : items.filter((item) => `${item.productName} ${item.sku}`.toLowerCase().includes(term)); }, [items, search]);
+  const chosen = items.filter((item) => selected.has(item.storeProductId) && Number(quantities[item.storeProductId]) > 0);
+  function toggle(id: string): void { setSelected((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }
+  async function createDraft(): Promise<void> {
+    if (chosen.length === 0) return;
+    setBusy(true); setFeedback(null);
     try {
-      await action();
-      await invalidate();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The request failed');
-    } finally {
-      setBusy(false);
-    }
+      const response = await pharmacyApi.purchaseOrders.create({ ...(supplierId ? { supplierId } : {}), ...(expectedAt ? { expectedAt } : {}), note: 'From reorder suggestions', items: chosen.map((item) => ({ name: item.productName, quantity: quantities[item.storeProductId]!, pharmacyProductId: item.pharmacyProductId })) }, { idempotencyKey: key() });
+      setFeedback({ kind: 'note', text: `Draft ${response.data.id.slice(0, 8)} created with ${chosen.length} items.` });
+      await queryClient.invalidateQueries({ queryKey: ['purchasing', 'purchase-orders'] }); onCreated();
+    } catch (cause) { setFeedback({ kind: 'error', text: message(cause, 'Could not create the draft order') }); }
+    finally { setBusy(false); }
   }
-
-  async function createOrder(): Promise<void> {
-    await run(async () => {
-      const created = await pharmacyApi.purchaseOrders.create({
-        ...(supplierId === '' ? {} : { supplierId }),
-        ...(expectedAt === '' ? {} : { expectedAt }),
-        ...(orderNote.trim() === '' ? {} : { note: orderNote.trim() }),
-      });
-      setNote(`Order ${created.data.id.slice(0, 8)} created as a draft.`);
-      setSupplierId(''); setExpectedAt(''); setOrderNote('');
-      setSelectedId(created.data.id);
-    });
-  }
-
-  async function addLine(orderId: string): Promise<void> {
-    if (newLineName.trim() === '') {
-      setError('A line needs a name.');
-      return;
-    }
-    await run(async () => {
-      await pharmacyApi.purchaseOrders.addItem(orderId, {
-        name: newLineName.trim(),
-        quantity: newLineQty,
-        ...(newLineCost.trim() === '' ? {} : { estUnitCost: newLineCost.trim() }),
-      });
-      setNewLineName(''); setNewLineQty('10'); setNewLineCost('');
-      setNote('Line added.');
-    });
-  }
-
-  async function convert(order: PurchaseOrder): Promise<void> {
-    await run(async () => {
-      const result = (
-        await pharmacyApi.purchaseOrders.toPurchase(
-          order.id,
-          convertSupplierId === '' ? {} : { supplierId: convertSupplierId },
-        )
-      ).data;
-      setSkippedLines(result.skipped.map((line) => `${line.name}: ${line.reason}`));
-      setNote(`Purchase draft ${result.purchaseId.slice(0, 8)} created (${result.convertedCount} lines).`);
-    });
-  }
-
-  const selected = selectedId === '' ? null : detail.data ?? null;
-
-  return (
-    <section className="surface purchasing-orders" style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
-      <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Purchase Orders</h2>
-      <ReorderPanel onDraftCreated={(orderId) => setSelectedId(orderId)} />
-
-      {(error !== null || note !== null || ordersQuery.isError) && (
-        <p role={error !== null ? 'alert' : undefined} style={{ margin: 0, color: error !== null ? colors.danger : colors.success }}>
-          {error ??
-            note ??
-            (ordersQuery.isError ? (ordersQuery.error instanceof Error ? ordersQuery.error.message : 'Could not load orders') : '')}
-        </p>
-      )}
-      {skippedLines.length > 0 && (
-        <div style={{ border: `1px solid ${colors.border}`, borderRadius: 8, padding: spacing.sm }}>
-          <strong>Lines not converted:</strong>
-          <ul style={{ margin: `${spacing.xs} 0 0`, paddingLeft: spacing.lg }}>
-            {skippedLines.map((line) => <li key={line}>{line}</li>)}
-          </ul>
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: spacing.xs, flexWrap: 'wrap' }}>
-        <select
-          style={input}
-          value={statusFilter}
-          onChange={(event) => setStatusFilter(event.target.value as PurchaseOrderStatusWire | '')}
-        >
-          <option value="">All statuses</option>
-          {PO_STATUSES.map((status) => <option key={status} value={status}>{status}</option>)}
-        </select>
-      </div>
-
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: tokens.typography.sizes.sm }}>
-        <thead>
-          <tr style={{ textAlign: 'left', color: colors.muted }}>
-            <th>Created</th><th>Status</th><th>Note</th><th />
-          </tr>
-        </thead>
-        <tbody>
-          {(ordersQuery.data ?? []).map((order) => (
-            <tr key={order.id}>
-              <td style={{ padding: `${spacing.xs} 0` }}>{order.createdAt.slice(0, 10)}</td>
-              <td style={{ color: order.status === 'draft' ? colors.warning : order.status === 'cancelled' ? colors.danger : colors.success }}>{order.status}</td>
-              <td>{order.note ?? '—'}</td>
-              <td><button type="button" style={quietButton} onClick={() => { resetFeedback(); setSelectedId(order.id); }}>Open</button></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {ordersQuery.data !== undefined && ordersQuery.data.length === 0 && <p style={{ margin: 0, color: colors.muted }}>No purchase orders yet.</p>}
-
-      <h3 style={{ margin: 0 }}>Start an order</h3>
-      <select style={input} value={supplierId} onChange={(event) => setSupplierId(event.target.value)}>
-        <option value="">Supplier (optional for now)</option>
-        {suppliers.map((supplier: Supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
-      </select>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.xs }}>
-        <input style={input} type="date" value={expectedAt} onChange={(event) => setExpectedAt(event.target.value)} />
-        <input style={input} placeholder="Note" value={orderNote} onChange={(event) => setOrderNote(event.target.value)} />
-      </div>
-      <button type="button" style={button} disabled={busy} onClick={() => void createOrder()}>Create draft order</button>
-
-      {selected !== null && (
-        <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: spacing.md, display: 'flex', flexDirection: 'column', gap: spacing.sm }}>
-          <h3 style={{ margin: 0 }}>{orderLabel(selected)} — {selected.status}</h3>
-          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
-            {selected.items.map((item) => (
-              <li key={item.id} style={{ display: 'flex', justifyContent: 'space-between', gap: spacing.xs, flexWrap: 'wrap' }}>
-                <span>{item.name} · qty {item.quantity}{item.estUnitCost ? ` · ~৳${item.estUnitCost}` : ''}</span>
-                {selected.status === 'draft' && (
-                  <button type="button" style={quietButton} onClick={() => void run(async () => {
-                    await pharmacyApi.purchaseOrders.removeItem(selected.id, item.id);
-                    setNote('Line removed.');
-                  })}>Remove</button>
-                )}
-              </li>
-            ))}
-            {selected.items.length === 0 && <li style={{ color: colors.muted }}>No lines yet.</li>}
-          </ul>
-          {selected.status === 'draft' && (
-            <>
-              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: spacing.xs }}>
-                <input style={input} placeholder="What to order (free text)" value={newLineName} onChange={(event) => setNewLineName(event.target.value)} />
-                <input style={input} placeholder="Qty" value={newLineQty} onChange={(event) => setNewLineQty(decimalEntry(event.target.value))} inputMode="decimal" />
-                <input style={input} placeholder="Est. cost" value={newLineCost} onChange={(event) => setNewLineCost(decimalEntry(event.target.value))} inputMode="decimal" />
-              </div>
-              <button type="button" style={quietButton} disabled={busy} onClick={() => void addLine(selected.id)}>Add line</button>
-            </>
-          )}
-          <div style={{ display: 'flex', gap: spacing.xs, flexWrap: 'wrap' }}>
-            {selected.status === 'draft' && (
-              <button type="button" style={button} onClick={() => void run(async () => {
-                await pharmacyApi.purchaseOrders.order(selected.id);
-                setNote('Marked as ordered.');
-              })}>Mark ordered</button>
-            )}
-            {selected.status === 'ordered' && (
-              <>
-                <button type="button" style={button} onClick={() => void run(async () => {
-                  await pharmacyApi.purchaseOrders.close(selected.id);
-                  setNote('Order closed.');
-                })}>Close</button>
-                {mayManagePurchases && (
-                  <>
-                    <select style={input} value={convertSupplierId} onChange={(event) => setConvertSupplierId(event.target.value)}>
-                      <option value="">Convert with supplier…</option>
-                      {suppliers.map((supplier: Supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
-                    </select>
-                    <button type="button" style={button} disabled={busy} onClick={() => void convert(selected)}>Convert to purchase draft</button>
-                  </>
-                )}
-              </>
-            )}
-            {(selected.status === 'draft' || selected.status === 'ordered') && (
-              <button type="button" style={quietButton} onClick={() => void run(async () => {
-                await pharmacyApi.purchaseOrders.cancel(selected.id);
-                setNote('Order cancelled.');
-              })}>Cancel order</button>
-            )}
-            <button type="button" style={quietButton} onClick={() => setSelectedId('')}>Close panel</button>
-          </div>
-          {mayManagePurchases && selected.status === 'ordered' && (
-            <p style={{ margin: 0, color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
-              Conversion creates a purchase draft; confirm it on the purchases side to book stock and supplier due.
-            </p>
-          )}
-        </div>
-      )}
-    </section>
-  );
+  return <section className="purchasing-stage" aria-labelledby="replenishment-title">
+    <header className="workspace-section-heading"><div><h2 id="replenishment-title">Below minimum</h2><p>Review suggested quantities before creating a draft order.</p></div><span className="workspace-count">{items.length} items</span></header>
+    <div className="purchasing-toolbar"><label className="search-field"><span className="sr-only">Search replenishment suggestions</span><input className="field" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search medicine or SKU" /></label><label><span>Supplier</span><select className="field" value={supplierId} onChange={(event) => setSupplierId(event.target.value)}><option value="">Assign later</option>{suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select></label><label><span>Expected</span><input className="field" type="date" value={expectedAt} onChange={(event) => setExpectedAt(event.target.value)} /></label></div>
+    {query.isPending && <p className="empty-copy">Checking branch minimums…</p>}{query.isError && <p role="alert" className="status-message status-message--error">{message(query.error, 'Could not load reorder suggestions')}</p>}
+    {!query.isPending && items.length === 0 && <div className="purchasing-empty"><strong>Stock levels look healthy</strong><span>Nothing is currently below its minimum.</span></div>}
+    {items.length > 0 && <div className="responsive-table"><table className="purchasing-table"><thead><tr><th className="check-cell"><input type="checkbox" aria-label="Select all shown suggestions" checked={shown.length > 0 && shown.every((item) => selected.has(item.storeProductId))} onChange={(event) => setSelected((current) => { const next = new Set(current); shown.forEach((item) => event.target.checked ? next.add(item.storeProductId) : next.delete(item.storeProductId)); return next; })} /></th><th>Medicine</th><th>Available</th><th>Minimum</th><th className="quantity-cell">Order quantity</th></tr></thead><tbody>{shown.map((item) => <ReorderRow key={item.storeProductId} item={item} checked={selected.has(item.storeProductId)} quantity={quantities[item.storeProductId] ?? item.suggestedQuantity} onToggle={() => toggle(item.storeProductId)} onQuantity={(quantity) => setQuantities((current) => ({ ...current, [item.storeProductId]: quantity }))} />)}</tbody></table></div>}
+    {feedback && <p role={feedback.kind === 'error' ? 'alert' : 'status'} className={`status-message${feedback.kind === 'error' ? ' status-message--error' : ''}`}>{feedback.text}</p>}
+    {items.length > 0 && <footer className="selection-action"><span><strong>{chosen.length}</strong> selected for this order</span><button type="button" className="primary-action" disabled={chosen.length === 0 || busy} onClick={() => void createDraft()}>{busy ? 'Creating draft…' : 'Create draft order'}</button></footer>}
+  </section>;
 }
 
-function PurchasesSection(): ReactNode {
-  const queryClient = useQueryClient();
-  const [supplierId, setSupplierId] = useState('');
-  const [invoiceNumber, setInvoiceNumber] = useState('');
-  const [lines, setLines] = useState<readonly DraftLine[]>([{ ...emptyLine }]);
-  const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+function ReorderRow({ item, checked, quantity, onToggle, onQuantity }: { item: ReorderSuggestion; checked: boolean; quantity: string; onToggle: () => void; onQuantity: (value: string) => void }): ReactNode {
+  return <tr className={checked ? 'is-selected' : ''}><td className="check-cell"><input type="checkbox" checked={checked} aria-label={`Select ${item.productName}`} onChange={onToggle} /></td><td data-label="Medicine"><strong>{item.productName}</strong><small>{item.sku}</small></td><td data-label="Available" className="warning-value">{quantityText(item.available)}</td><td data-label="Minimum">{quantityText(item.minimumStock)}</td><td data-label="Order quantity" className="quantity-cell"><input className="field" aria-label={`Order quantity for ${item.productName}`} inputMode="decimal" value={quantity} onChange={(event) => onQuantity(decimalEntry(event.target.value))} /></td></tr>;
+}
 
-  const purchasesQuery = useQuery({
-    queryKey: ['purchasing', 'purchases'],
-    queryFn: async () => (await pharmacyApi.purchases.list({ limit: 25 })).items,
-    staleTime: 15_000,
-  });
-  const suppliersQuery = useQuery({
-    queryKey: ['purchasing', 'suppliers'],
-    queryFn: async () => (await pharmacyApi.suppliers.list({ limit: 100 })).items,
-    staleTime: 60_000,
-  });
-  const shelfQuery = useQuery({
-    queryKey: ['purchasing', 'shelf'],
-    queryFn: async () => (await pharmacyApi.products.listCurrentStoreProducts()).items,
-    staleTime: 30_000,
-  });
+function OrdersView({ suppliers, shelf }: { suppliers: readonly Supplier[]; shelf: readonly ShelfItem[] }): ReactNode {
+  const router = useRouter(); const pathname = usePathname(); const searchParams = useSearchParams();
+  const status = orderStatuses.includes(searchParams.get('status') as PurchaseOrderStatusWire) ? searchParams.get('status') as PurchaseOrderStatusWire : '';
+  const search = searchParams.get('q') ?? '';
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const inspectorTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const query = useQuery({ queryKey: ['purchasing', 'purchase-orders', status], queryFn: async () => (await pharmacyApi.purchaseOrders.list(status ? { status } : {}, { limit: 100 })).items, staleTime: 15_000 });
+  const orders = useMemo(() => { const term = search.trim().toLowerCase(); return (query.data ?? []).filter((order) => term === '' || `${order.supplierName ?? ''} ${order.note ?? ''} ${order.id}`.toLowerCase().includes(term)); }, [query.data, search]);
+  function setFilter(name: string, value: string): void { const params = new URLSearchParams(searchParams.toString()); if (value) params.set(name, value); else params.delete(name); router.replace(`${pathname}?${params.toString()}`, { scroll: false }); }
+  function closeInspector(): void { setSelectedId(null); restoreFocus(inspectorTriggerRef.current); }
+  return <section className="purchasing-stage" aria-labelledby="orders-title">
+    <header className="workspace-section-heading"><div><h2 id="orders-title">Purchase orders</h2><p>Draft, place, and follow orders through delivery.</p></div><span className="workspace-count">{orders.length} shown</span></header>
+    <div className="purchasing-toolbar purchasing-toolbar--orders"><label className="search-field"><span className="sr-only">Search purchase orders</span><input className="field" placeholder="Search supplier, note, or order ID" value={search} onChange={(event) => setFilter('q', event.target.value)} /></label><label><span>Status</span><select className="field" value={status} onChange={(event) => setFilter('status', event.target.value)}><option value="">All statuses</option>{orderStatuses.map((value) => <option key={value} value={value}>{statusLabel(value)}</option>)}</select></label></div>
+    {query.isPending && <p className="empty-copy">Loading purchase orders…</p>}
+    {query.isError && <p role="alert" className="status-message status-message--error">{message(query.error, 'Could not load purchase orders')}</p>}
+    {!query.isPending && orders.length === 0 && <div className="purchasing-empty"><strong>No matching orders</strong><span>Adjust the filter or start a new order.</span></div>}
+    {orders.length > 0 && <div className="responsive-table"><table className="purchasing-table order-table"><thead><tr><th>Order</th><th>Supplier</th><th>Status</th><th>Expected</th><th>Items</th><th>Received</th><th><span className="sr-only">Open</span></th></tr></thead><tbody>{orders.map((order) => <tr key={order.id}><td data-label="Order"><strong>PO-{order.id.slice(0, 8)}</strong><small>{order.createdAt.slice(0, 10)}</small></td><td data-label="Supplier">{order.supplierName ?? 'Not assigned'}</td><td data-label="Status"><StatusBadge status={order.status} /></td><td data-label="Expected">{order.expectedAt ?? '—'}</td><td data-label="Items">{order.itemCount}</td><td data-label="Received"><Progress value={orderProgress(order)} label={`${quantityText(order.receivedQuantity)} of ${quantityText(order.orderedQuantity)}`} /></td><td className="row-action"><button type="button" className="quiet-action" onClick={(event) => { inspectorTriggerRef.current = event.currentTarget; setSelectedId(order.id); }}>Open</button></td></tr>)}</tbody></table></div>}
+    {selectedId && <OverlayPortal><OrderInspector orderId={selectedId} suppliers={suppliers} shelf={shelf} onClose={closeInspector} /></OverlayPortal>}
+  </section>;
+}
 
-  const purchases = purchasesQuery.data ?? [];
-  const suppliers = suppliersQuery.data ?? [];
-  const shelf = shelfQuery.data ?? [];
+function StatusBadge({ status }: { status: PurchaseOrderStatusWire }): ReactNode { return <span className={`status-badge status-badge--${status}`}>{statusLabel(status)}</span>; }
+function Progress({ value, label }: { value: number; label: string }): ReactNode { return <span className="order-progress"><span aria-hidden="true"><i style={{ width: `${value * 100}%` }} /></span><small>{label}</small></span>; }
 
-  function lineProblems(line: DraftLine): { quantity: string | null; unitCost: string | null } {
-    return {
-      quantity: line.quantity.trim() === '' ? null : fieldIssue(positiveQuantity.safeParse(line.quantity)),
-      unitCost: line.unitCost.trim() === '' ? null : fieldIssue(decimalAmount.safeParse(line.unitCost)),
-    };
-  }
+function OrderInspector({ orderId, suppliers: _suppliers, shelf, onClose }: { orderId: string; suppliers: readonly Supplier[]; shelf: readonly ShelfItem[]; onClose: () => void }): ReactNode {
+  const queryClient = useQueryClient(); const router = useRouter(); const panelRef = useRef<HTMLElement>(null); const [busy, setBusy] = useState(false); const [feedback, setFeedback] = useState<string | null>(null);
+  const detail = useQuery({ queryKey: ['purchasing', 'purchase-order', orderId], queryFn: async () => (await pharmacyApi.purchaseOrders.read(orderId)).data }); const order = detail.data;
+  useDialogFocus(panelRef);
+  async function run(action: () => Promise<unknown>): Promise<void> { setBusy(true); setFeedback(null); try { await action(); await Promise.all([queryClient.invalidateQueries({ queryKey: ['purchasing', 'purchase-orders'] }), queryClient.invalidateQueries({ queryKey: ['purchasing', 'purchase-order', orderId] })]); } catch (cause) { setFeedback(message(cause, 'The order could not be updated')); } finally { setBusy(false); } }
+  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={panelRef} tabIndex={-1} className="purchase-inspector" role="dialog" aria-modal="true" aria-labelledby="order-inspector-title" onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}><header><div><span className="eyebrow">Purchase order</span><h2 id="order-inspector-title">PO-{orderId.slice(0, 8)}</h2>{order && <p>{order.supplierName ?? 'Supplier not assigned'} · {statusLabel(order.status)}</p>}</div><button type="button" className="icon-action" aria-label="Close order" onClick={onClose}>×</button></header>{detail.isPending && <p className="empty-copy">Loading order…</p>}{detail.isError && <p role="alert" className="status-message status-message--error">{message(detail.error, 'Could not load order')}</p>}{order && <><dl className="order-meta"><div><dt>Created</dt><dd>{order.createdAt.slice(0, 10)}</dd></div><div><dt>Expected</dt><dd>{order.expectedAt ?? 'Not set'}</dd></div><div><dt>Items</dt><dd>{order.itemCount}</dd></div><div><dt>Received</dt><dd>{quantityText(order.receivedQuantity)} / {quantityText(order.orderedQuantity)}</dd></div></dl>{order.note && <p className="order-note">{order.note}</p>}<section className="inspector-section"><div className="inspector-section-title"><h3>Order lines</h3><span>{order.items.length}</span></div><ul className="order-line-list">{order.items.map((item) => <OrderLineEditor key={item.id} order={order} item={item} busy={busy} onRun={run} />)}</ul>{order.status === 'draft' && <OrderLineAdder orderId={order.id} shelf={shelf} busy={busy} onRun={run} />}</section>{feedback && <p role="alert" className="status-message status-message--error">{feedback}</p>}<footer className="inspector-actions">{order.status === 'draft' && <button type="button" className="primary-action" disabled={busy || order.items.length === 0} onClick={() => void run(() => pharmacyApi.purchaseOrders.order(order.id))}>Place order</button>}{(order.status === 'ordered' || order.status === 'partially_received') && <button type="button" className="primary-action" disabled={busy} onClick={() => router.push(`/pos?mode=receive&purchaseOrderId=${order.id}`)}>Receive in POS</button>}{(order.status === 'ordered' || order.status === 'partially_received') && <button type="button" className="quiet-action" disabled={busy} onClick={() => void run(() => pharmacyApi.purchaseOrders.close(order.id))}>Close incomplete</button>}{(order.status === 'draft' || order.status === 'ordered') && <button type="button" className="quiet-action danger-action" disabled={busy} onClick={() => void run(() => pharmacyApi.purchaseOrders.cancel(order.id))}>Cancel order</button>}</footer></>}</section></div>;
+}
 
-  const completeLines = lines.filter((line) => line.storeProductId !== '' && line.quantity !== '' && line.unitCost !== '' && line.batchNumber !== '');
-  const validLines = completeLines.filter((line) => draftLineSchema.safeParse(line).success);
-  const draftReady = supplierId !== '' && completeLines.length > 0 && validLines.length === completeLines.length;
+function OrderLineEditor({ order, item, busy, onRun }: { order: PurchaseOrder; item: PurchaseOrderItem; busy: boolean; onRun: (action: () => Promise<unknown>) => Promise<void> }): ReactNode {
+  const [quantity, setQuantity] = useState(item.quantity); const [cost, setCost] = useState(item.estUnitCost ?? ''); const changed = quantity !== item.quantity || cost !== (item.estUnitCost ?? '');
+  return <li><div className="order-line-main"><strong>{item.name}</strong>{order.status === 'draft' ? <div className="order-line-edit"><label><span>Quantity</span><input className="field" inputMode="decimal" value={quantity} onChange={(event) => setQuantity(decimalEntry(event.target.value))} /></label><label><span>Est. cost</span><input className="field" inputMode="decimal" value={cost} onChange={(event) => setCost(decimalEntry(event.target.value))} placeholder="Optional" /></label></div> : <span>Ordered {quantityText(item.quantity)} · received {quantityText(item.receivedQuantity)} · remaining {quantityText(item.remainingQuantity)}</span>}</div>{order.status === 'draft' && <div className="order-line-buttons">{changed && <button type="button" className="quiet-action" disabled={busy || Number(quantity) <= 0} onClick={() => void onRun(() => pharmacyApi.purchaseOrders.updateItem(order.id, item.id, { quantity, estUnitCost: cost === '' ? null : cost }))}>Save</button>}<button type="button" className="line-remove" aria-label={`Remove ${item.name}`} disabled={busy} onClick={() => void onRun(() => pharmacyApi.purchaseOrders.removeItem(order.id, item.id))}>×</button></div>}</li>;
+}
 
-  async function refreshLists(): Promise<void> {
-    await queryClient.invalidateQueries({ queryKey: ['purchasing'] });
-  }
+function lineBody(selection: MedicineSelection | null, shelf: readonly ShelfItem[], quantity: string, cost: string): { name: string; quantity: string; estUnitCost?: string; pharmacyProductId?: string; catalogProductId?: string } | null {
+  if (selection === null || Number(quantity) <= 0) return null;
+  if (selection.kind === 'local') { const row = shelf.find((entry) => entry.id === selection.item.id); return { name: selection.item.name, quantity, ...(cost ? { estUnitCost: cost } : {}), ...(row ? { pharmacyProductId: row.pharmacyProductId } : {}) }; }
+  if (selection.kind === 'catalog') return { name: selection.item.name, quantity, ...(cost ? { estUnitCost: cost } : {}), ...(selection.item.pharmacyProductId ? { pharmacyProductId: selection.item.pharmacyProductId } : {}), ...(selection.item.catalogProductId ? { catalogProductId: selection.item.catalogProductId } : {}) };
+  return { name: selection.name, quantity, ...(cost ? { estUnitCost: cost } : {}) };
+}
 
-  async function createDraft(): Promise<void> {
-    setError(null);
-    setNote(null);
-    if (!draftReady) return;
-    try {
-      const response = await pharmacyApi.purchases.create({
-        supplierId,
-        ...(invoiceNumber.trim() === '' ? {} : { invoiceNumber: invoiceNumber.trim() }),
-        items: validLines.map((line) => ({
-          storeProductId: line.storeProductId,
-          quantity: line.quantity,
-          unitCost: line.unitCost,
-          batchNumber: line.batchNumber,
-          ...(line.expiryDate === '' ? {} : { expiryDate: line.expiryDate }),
-        })),
-      });
-      setNote(`Draft ${response.data.id.slice(0, 8)} created.`);
-      setLines([{ ...emptyLine }]);
-      setInvoiceNumber('');
-      await refreshLists();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not create the draft');
-    }
-  }
+function OrderLineAdder({ orderId, shelf, busy, onRun }: { orderId: string; shelf: readonly ShelfItem[]; busy: boolean; onRun: (action: () => Promise<unknown>) => Promise<void> }): ReactNode {
+  const [selection, setSelection] = useState<MedicineSelection | null>(null); const [quantity, setQuantity] = useState('1'); const [cost, setCost] = useState(''); const line = lineBody(selection, shelf, quantity, cost);
+  const products = shelf.map((row) => ({ ...row, barcode: row.barcode ?? null, rack: row.rack ?? null }));
+  return <div className="order-line-adder"><h4>Add a line</h4>{selection === null ? <MedicineFinder products={products} actionLabel="Add to order" onSelect={setSelection} /> : <><div className="selected-product"><strong>{selection.kind === 'custom' ? selection.name : selection.item.name}</strong><button type="button" className="quiet-action" onClick={() => setSelection(null)}>Change</button></div><div className="order-line-edit"><label><span>Quantity</span><input className="field" inputMode="decimal" value={quantity} onChange={(event) => setQuantity(decimalEntry(event.target.value))} /></label><label><span>Est. cost</span><input className="field" inputMode="decimal" value={cost} onChange={(event) => setCost(decimalEntry(event.target.value))} placeholder="Optional" /></label></div><button type="button" className="quiet-action" disabled={busy || line === null} onClick={() => line && void onRun(async () => { await pharmacyApi.purchaseOrders.addItem(orderId, line); setSelection(null); setQuantity('1'); setCost(''); })}>Add line</button></>}</div>;
+}
 
-  async function confirm(purchaseId: string): Promise<void> {
-    setError(null);
-    setNote(null);
-    try {
-      await pharmacyApi.purchases.confirm(purchaseId);
-      setNote('Purchase confirmed; batches booked.');
-      await refreshLists();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not confirm the purchase');
-    }
-  }
+function NewOrderDrawer({ suppliers, shelf, onClose, onCreated }: { suppliers: readonly Supplier[]; shelf: readonly ShelfItem[]; onClose: () => void; onCreated: () => void }): ReactNode {
+  const queryClient = useQueryClient(); const panelRef = useRef<HTMLElement>(null); const [supplierId, setSupplierId] = useState(''); const [expectedAt, setExpectedAt] = useState(''); const [note, setNote] = useState(''); const [lines, setLines] = useState<readonly OrderDraftLine[]>([]); const [selection, setSelection] = useState<MedicineSelection | null>(null); const [quantity, setQuantity] = useState('1'); const [cost, setCost] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
+  useDialogFocus(panelRef);
+  function addSelection(): void { const line = lineBody(selection, shelf, quantity, cost); if (line === null) return; setLines((current) => [...current, { id: key(), estUnitCost: line.estUnitCost ?? '', ...line }]); setSelection(null); setQuantity('1'); setCost(''); }
+  async function create(place: boolean): Promise<void> { setBusy(true); setError(null); try { const response = await pharmacyApi.purchaseOrders.create({ ...(supplierId ? { supplierId } : {}), ...(expectedAt ? { expectedAt } : {}), ...(note.trim() ? { note: note.trim() } : {}), items: lines.map(({ id: _id, estUnitCost, ...line }) => ({ ...line, ...(estUnitCost ? { estUnitCost } : {}) })) }, { idempotencyKey: key() }); if (place) await pharmacyApi.purchaseOrders.order(response.data.id); await queryClient.invalidateQueries({ queryKey: ['purchasing', 'purchase-orders'] }); onCreated(); } catch (cause) { setError(message(cause, 'Could not create the order')); } finally { setBusy(false); } }
+  const products = shelf.map((row) => ({ ...row, barcode: row.barcode ?? null, rack: row.rack ?? null }));
+  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={panelRef} tabIndex={-1} className="purchase-inspector new-order-drawer" role="dialog" aria-modal="true" aria-labelledby="new-order-title" onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}><header><div><span className="eyebrow">Purchase order</span><h2 id="new-order-title">New order</h2><p>Add products now or save an empty draft for later.</p></div><button type="button" className="icon-action" aria-label="Close new order" onClick={onClose}>×</button></header><div className="new-order-meta"><label><span>Supplier</span><select className="field" value={supplierId} onChange={(event) => setSupplierId(event.target.value)}><option value="">Assign later</option>{suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select></label><label><span>Expected</span><input className="field" type="date" value={expectedAt} onChange={(event) => setExpectedAt(event.target.value)} /></label><label className="wide-field"><span>Note</span><textarea className="field field--textarea" value={note} onChange={(event) => setNote(event.target.value)} placeholder="Optional order note" /></label></div><section className="inspector-section"><div className="inspector-section-title"><h3>Order lines</h3><span>{lines.length}</span></div>{lines.length > 0 && <ul className="order-line-list">{lines.map((line) => <li key={line.id}><div className="order-line-main"><strong>{line.name}</strong><span>{quantityText(line.quantity)}{line.estUnitCost ? ` · ~৳${line.estUnitCost} each` : ''}</span></div><button type="button" className="line-remove" aria-label={`Remove ${line.name}`} onClick={() => setLines((current) => current.filter((entry) => entry.id !== line.id))}>×</button></li>)}</ul>}<div className="order-line-adder">{selection === null ? <MedicineFinder products={products} actionLabel="Select" onSelect={setSelection} /> : <><div className="selected-product"><strong>{selection.kind === 'custom' ? selection.name : selection.item.name}</strong><button type="button" className="quiet-action" onClick={() => setSelection(null)}>Change</button></div><div className="order-line-edit"><label><span>Quantity</span><input className="field" inputMode="decimal" value={quantity} onChange={(event) => setQuantity(decimalEntry(event.target.value))} /></label><label><span>Est. cost</span><input className="field" inputMode="decimal" value={cost} onChange={(event) => setCost(decimalEntry(event.target.value))} placeholder="Optional" /></label></div><button type="button" className="quiet-action" disabled={Number(quantity) <= 0} onClick={addSelection}>Add to order</button></>}</div></section>{error && <p role="alert" className="status-message status-message--error">{error}</p>}<footer className="inspector-actions"><button type="button" className="quiet-action" disabled={busy} onClick={() => void create(false)}>{busy ? 'Saving…' : 'Save draft'}</button><button type="button" className="primary-action" disabled={busy || lines.length === 0} onClick={() => void create(true)}>Place order</button></footer></section></div>;
+}
 
-  return (
-    <section className="surface purchasing-purchases" style={card}>
-      <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Purchases ({purchases.length})</h2>
-      {purchasesQuery.isError && (
-        <p role="alert" style={{ margin: 0, color: colors.danger }}>{purchasesQuery.error instanceof Error ? purchasesQuery.error.message : 'Could not load purchases'}</p>
-      )}
-      {purchasesQuery.isPending && <p style={{ color: colors.muted }}>Loading…</p>}
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: tokens.typography.sizes.sm }}>
-        <thead>
-          <tr style={{ textAlign: 'left', color: colors.muted }}>
-            <th>Date</th><th>Invoice</th><th>Status</th><th>Total</th><th />
-          </tr>
-        </thead>
-        <tbody>
-          {purchases.map((purchase) => (
-            <tr key={purchase.id}>
-              <td style={{ padding: `${spacing.xs} 0` }}>{purchase.purchasedAt}</td>
-              <td>{purchase.invoiceNumber ?? '—'}</td>
-              <td style={{ color: purchase.status === 'confirmed' ? colors.success : colors.warning }}>{purchase.status}</td>
-              <td>{purchase.totalAmount ? `৳${purchase.totalAmount}` : '—'}</td>
-              <td>
-                {purchase.status === 'draft' && (
-                  <button type="button" style={{ ...input, cursor: 'pointer' }} onClick={() => void confirm(purchase.id)}>Confirm</button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {!purchasesQuery.isPending && purchases.length === 0 && <p style={{ color: colors.muted }}>No purchases yet.</p>}
+function HistoryView({ suppliers, mayManagePurchases }: { suppliers: readonly Supplier[]; mayManagePurchases: boolean }): ReactNode {
+  const { user } = useSession(); const queryClient = useQueryClient(); const router = useRouter(); const pathname = usePathname(); const searchParams = useSearchParams();
+  const supplierId = searchParams.get('supplier') ?? ''; const statusParam = searchParams.get('status'); const status: '' | 'draft' | 'confirmed' | 'returned' = statusParam === 'draft' || statusParam === 'confirmed' || statusParam === 'returned' ? statusParam : ''; const purchasedFrom = searchParams.get('from') ?? ''; const purchasedTo = searchParams.get('to') ?? '';
+  const [selected, setSelected] = useState<Purchase | null>(null); const [printable, setPrintable] = useState<PrintablePurchaseReceipt | null>(null); const [feedback, setFeedback] = useState<string | null>(null);
+  const inspectorTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const query = useQuery({ queryKey: ['purchasing', 'purchases', supplierId, status, purchasedFrom, purchasedTo], queryFn: async () => (await pharmacyApi.purchases.list({ ...(supplierId ? { supplierId } : {}), ...(status ? { status } : {}), ...(purchasedFrom ? { purchasedFrom } : {}), ...(purchasedTo ? { purchasedTo } : {}) }, { limit: 100 })).items, staleTime: 15_000 });
+  function setFilter(name: string, value: string): void { const params = new URLSearchParams(searchParams.toString()); if (value) params.set(name, value); else params.delete(name); router.replace(`${pathname}?${params.toString()}`, { scroll: false }); }
+  function closeInspector(): void { setSelected(null); restoreFocus(inspectorTriggerRef.current); }
+  async function confirm(purchaseId: string): Promise<void> { try { await pharmacyApi.purchases.confirm(purchaseId, { idempotencyKey: key() }); closeInspector(); await queryClient.invalidateQueries({ queryKey: ['purchasing'] }); } catch (cause) { setFeedback(message(cause, 'Could not confirm the purchase draft')); } }
+  async function voucher(purchaseId: string): Promise<void> { try { const response = await pharmacyApi.purchases.receipt(purchaseId); setPrintable({ receipt: response.data, config: defaultReceiptConfig, organizationName: user?.organizationName ?? '', storeName: user?.storeName ?? '', staffName: user?.user.displayName ?? '', locale: 'en-BD', timezone: 'Asia/Dhaka' }); } catch (cause) { setFeedback(message(cause, 'Could not load the voucher')); } }
+  const purchases = query.data ?? [];
+  return <section className="purchasing-stage" aria-labelledby="history-title">
+    <header className="workspace-section-heading"><div><h2 id="history-title">Purchase history</h2><p>Confirmed receipts, returns, and manager review drafts.</p></div><span className="workspace-count">{purchases.length} records</span></header>
+    <div className="purchasing-toolbar purchasing-toolbar--history"><label><span>Supplier</span><select className="field" value={supplierId} onChange={(event) => setFilter('supplier', event.target.value)}><option value="">All suppliers</option>{suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select></label><label><span>From</span><input className="field" type="date" value={purchasedFrom} max={purchasedTo || undefined} onChange={(event) => setFilter('from', event.target.value)} /></label><label><span>To</span><input className="field" type="date" value={purchasedTo} min={purchasedFrom || undefined} onChange={(event) => setFilter('to', event.target.value)} /></label><label><span>Status</span><select className="field" value={status} onChange={(event) => setFilter('status', event.target.value)}><option value="">All statuses</option><option value="confirmed">Confirmed</option><option value="returned">Returned</option>{mayManagePurchases && <option value="draft">Needs review</option>}</select></label></div>
+    {query.isPending && <p className="empty-copy">Loading purchase history…</p>}
+    {query.isError && <p role="alert" className="status-message status-message--error">{message(query.error, 'Could not load purchase history')}</p>}
+    {!query.isPending && purchases.length === 0 && <div className="purchasing-empty"><strong>No matching purchases</strong><span>Supplier receipts will appear here after posting.</span></div>}
+    {purchases.length > 0 && <div className="responsive-table"><table className="purchasing-table"><thead><tr><th>Date</th><th>Receipt</th><th>Supplier</th><th>Status</th><th>Items</th><th>Total</th><th><span className="sr-only">Open</span></th></tr></thead><tbody>{purchases.map((purchase) => <tr key={purchase.id}><td data-label="Date">{purchase.purchasedAt}</td><td data-label="Receipt"><strong>{purchase.receiptNumber ?? `Draft ${purchase.id.slice(0, 8)}`}</strong>{purchase.purchaseOrderId && <small>PO-{purchase.purchaseOrderId.slice(0, 8)}</small>}</td><td data-label="Supplier">{purchase.supplierName ?? '—'}</td><td data-label="Status"><span className={`status-badge status-badge--${purchase.status}`}>{purchase.status === 'draft' ? 'Needs review' : purchase.status.replace(/^./, (letter) => letter.toUpperCase())}</span></td><td data-label="Items">{purchase.itemCount}</td><td data-label="Total">{purchase.totalAmount ? `৳${purchase.totalAmount}` : 'Restricted'}</td><td className="row-action"><button type="button" className="quiet-action" onClick={(event) => { inspectorTriggerRef.current = event.currentTarget; setSelected(purchase); }}>Open</button></td></tr>)}</tbody></table></div>}
+    {feedback && <p role="alert" className="status-message status-message--error">{feedback}</p>}
+    {selected && <OverlayPortal><PurchaseInspector purchase={selected} mayManagePurchases={mayManagePurchases} onClose={closeInspector} onConfirm={confirm} onVoucher={voucher} /></OverlayPortal>}
+    {printable && <OverlayPortal><PurchaseReceiptDialog printable={printable} onClose={() => setPrintable(null)} /></OverlayPortal>}
+  </section>;
+}
 
-      <h3 style={{ marginBottom: spacing.xs }}>New purchase draft</h3>
-      <select style={input} value={supplierId} onChange={(event) => setSupplierId(event.target.value)}>
-        <option value="">Choose supplier…</option>
-        {suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
-      </select>
-      <input style={input} placeholder="Invoice number (optional)" value={invoiceNumber} onChange={(event) => setInvoiceNumber(event.target.value)} />
-      {lines.map((line, index) => {
-        const problems = lineProblems(line);
-        return (
-          <div key={index} style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, border: `1px solid ${colors.border}`, borderRadius: 8, padding: spacing.sm }}>
-            <select style={input} value={line.storeProductId} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, storeProductId: event.target.value } : entry)))}>
-              <option value="">Shelf product…</option>
-              {shelf.map((row) => <option key={row.id} value={row.id}>{shelfLabel(row)}</option>)}
-            </select>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.xs }}>
-              <div>
-                <input style={{ ...input, width: '100%', boxSizing: 'border-box' }} placeholder="Qty" value={line.quantity} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, quantity: decimalEntry(event.target.value) } : entry)))} inputMode="decimal" />
-                {problems.quantity !== null && <p role="alert" style={{ margin: `${spacing.xs} 0 0`, color: colors.danger, fontSize: tokens.typography.sizes.sm }}>{problems.quantity}</p>}
-              </div>
-              <div>
-                <input style={{ ...input, width: '100%', boxSizing: 'border-box' }} placeholder="Unit cost" value={line.unitCost} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, unitCost: decimalEntry(event.target.value) } : entry)))} inputMode="decimal" />
-                {problems.unitCost !== null && <p role="alert" style={{ margin: `${spacing.xs} 0 0`, color: colors.danger, fontSize: tokens.typography.sizes.sm }}>{problems.unitCost}</p>}
-              </div>
-              <input style={input} placeholder="Batch no." value={line.batchNumber} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, batchNumber: event.target.value } : entry)))} />
-              <input style={input} type="date" value={line.expiryDate} onChange={(event) => setLines(lines.map((entry, i) => (i === index ? { ...entry, expiryDate: event.target.value } : entry)))} />
-            </div>
-          </div>
-        );
-      })}
-      <div style={{ display: 'flex', gap: spacing.sm }}>
-        <button type="button" style={{ ...button, background: colors.surface, color: colors.foreground, border: `1px solid ${colors.border}` }} onClick={() => setLines([...lines, { ...emptyLine }])}>Add line</button>
-        <button type="button" style={button} disabled={!draftReady} onClick={() => void createDraft()}>Create draft</button>
-      </div>
-      {(error !== null || note !== null || suppliersQuery.isError || shelfQuery.isError) && (
-        <p role={error !== null ? 'alert' : undefined} style={{ margin: 0, color: error !== null ? colors.danger : colors.success }}>
-          {error ??
-            note ??
-            (suppliersQuery.isError
-              ? suppliersQuery.error instanceof Error
-                ? suppliersQuery.error.message
-                : 'Could not load suppliers'
-              : 'Could not load suppliers')}
-        </p>
-      )}
-    </section>
-  );
+function PurchaseInspector({ purchase, mayManagePurchases, onClose, onConfirm, onVoucher }: { purchase: Purchase; mayManagePurchases: boolean; onClose: () => void; onConfirm: (id: string) => Promise<void>; onVoucher: (id: string) => Promise<void> }): ReactNode {
+  const panelRef = useRef<HTMLElement>(null);
+  const detail = useQuery({ queryKey: ['purchasing', 'purchase', purchase.id], queryFn: async () => (await pharmacyApi.purchases.read(purchase.id)).data }); const row = detail.data ?? purchase;
+  useDialogFocus(panelRef);
+  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={panelRef} tabIndex={-1} className="purchase-inspector" role="dialog" aria-modal="true" aria-labelledby="purchase-inspector-title" onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}>
+    <header><div><span className="eyebrow">Supplier receipt</span><h2 id="purchase-inspector-title">{row.receiptNumber ?? `Draft ${row.id.slice(0, 8)}`}</h2><p>{row.supplierName ?? 'Supplier'} · {row.purchasedAt}</p></div><button type="button" className="icon-action" aria-label="Close purchase" onClick={onClose}>×</button></header>
+    {detail.isPending && <p className="empty-copy">Loading receipt lines…</p>}
+    {detail.isError && <p role="alert" className="status-message status-message--error">{message(detail.error, 'Could not load receipt details')}</p>}
+    {detail.data && <><dl className="order-meta"><div><dt>Status</dt><dd>{row.status}</dd></div><div><dt>Invoice</dt><dd>{row.invoiceNumber ?? 'Not recorded'}</dd></div><div><dt>Items</dt><dd>{row.items.length}</dd></div><div><dt>Total</dt><dd>{row.totalAmount ? `৳${row.totalAmount}` : 'Restricted'}</dd></div></dl><ul className="order-line-list purchase-line-list">{row.items.map((item) => <li key={item.id}><div className="order-line-main"><strong>{item.batchNumber}</strong><span>Qty {quantityText(item.quantity)}{item.lineTotal ? ` · ৳${item.lineTotal}` : ''}{item.expiryDate ? ` · expires ${item.expiryDate}` : ''}</span></div></li>)}</ul><footer className="inspector-actions">{row.status === 'confirmed' && row.receiptNumber && <button type="button" className="primary-action" onClick={() => void onVoucher(row.id)}>Print or copy voucher</button>}{row.status === 'draft' && mayManagePurchases && <button type="button" className="primary-action" onClick={() => void onConfirm(row.id)}>Confirm legacy draft</button>}</footer></>}
+  </section></div>;
 }

@@ -199,7 +199,7 @@ export default function DashboardPage(): ReactNode {
           ) : (
             <>
               <p style={{ margin: 0, fontSize: tokens.typography.sizes.lg }}>{taka(valuation.data.totalValueAtCost)}</p>
-              <p style={{ margin: 0, color: colors.muted }}>{valuation.data.items.length} products held</p>
+              <p style={{ margin: 0, color: colors.muted }}>{valuation.data.lines.length} products held</p>
               {monthCogs.data !== undefined && (
                 <p style={{ margin: `${spacing.xs} 0 0`, color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
                   Cost of goods sold this month: {taka(monthCogs.data.costOfGoodsSold)}
@@ -210,19 +210,19 @@ export default function DashboardPage(): ReactNode {
                 <p role="alert" style={{ margin: 0, color: colors.danger, fontSize: tokens.typography.sizes.sm }}>{queryMessage(deadStock.error)}</p>
               ) : deadStock.isPending ? (
                 <p style={{ color: colors.muted, fontSize: tokens.typography.sizes.sm }}>Loading…</p>
-              ) : deadStock.data.items.length === 0 ? (
+              ) : deadStock.data.lines.length === 0 ? (
                 <p style={{ margin: 0, color: colors.success, fontSize: tokens.typography.sizes.sm }}>Nothing idle.</p>
               ) : (
                 <ul style={{ listStyle: 'none', padding: 0, margin: `${spacing.xs} 0 0` }}>
-                  {deadStock.data.items.slice(0, 6).map((line) => (
+                  {deadStock.data.lines.slice(0, 6).map((line) => (
                     <li key={line.storeProductId} style={{ display: 'flex', justifyContent: 'space-between', fontSize: tokens.typography.sizes.sm }}>
                       <span>{line.sku} · {line.onHand} held</span>
                       <span style={{ color: colors.warning }}>{taka(line.valueAtCost)}</span>
                     </li>
                   ))}
-                  {deadStock.data.items.length > 6 && (
+                  {deadStock.data.lines.length > 6 && (
                     <li style={{ color: colors.muted, fontSize: tokens.typography.sizes.sm }}>
-                      +{deadStock.data.items.length - 6} more · {taka(deadStock.data.totalValueAtCost)} idle in total
+                      +{deadStock.data.lines.length - 6} more · {taka(deadStock.data.totalValueAtCost)} idle in total
                     </li>
                   )}
                 </ul>

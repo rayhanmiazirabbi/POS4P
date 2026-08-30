@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReceiveProductIdentity } from '@pharmacy/api';
+import type { PurchaseOrder, PurchaseOrderItem, ReceiveProductIdentity, ShelfItem } from '@pharmacy/api';
 import { create } from 'zustand';
 import { z } from 'zod';
 
@@ -9,6 +9,8 @@ import { localRecord } from './database';
 export type ReceiveCostMode = 'unit' | 'line';
 export type ReceiveDraftLine = {
   id: string;
+  purchaseOrderItemId?: string;
+  orderedQuantity?: string;
   identity: ReceiveProductIdentity;
   shelf?: { salePrice?: string; sku?: string; barcode?: string; rack?: string; minimumStock?: string };
   name: string;
@@ -22,6 +24,7 @@ export type ReceiveDraftLine = {
   expiryDate: string;
 };
 export type ReceiveDraft = {
+  purchaseOrderId: string;
   supplierId: string;
   supplierName: string;
   invoiceNumber: string;
@@ -32,10 +35,10 @@ export type ReceiveDraft = {
   updatedAt: string;
 };
 export type HeldReceiveDraft = { id: string; heldAt: string; label: string; draft: ReceiveDraft };
-export type PersistedReceiveDrafts = { version: 2; active: ReceiveDraft; held: readonly HeldReceiveDraft[] };
+export type PersistedReceiveDrafts = { version: 3; active: ReceiveDraft; held: readonly HeldReceiveDraft[] };
 
 const lineSchema = z.object({
-  id: z.string().min(1), identity: z.union([
+  id: z.string().min(1), purchaseOrderItemId: z.string().optional(), orderedQuantity: z.string().optional(), identity: z.union([
     z.object({ storeProductId: z.string().min(1) }),
     z.object({ pharmacyProductId: z.string().min(1) }),
     z.object({ catalogProductId: z.string().min(1) }),
@@ -46,19 +49,47 @@ const lineSchema = z.object({
   batchNumber: z.string(), expiryDate: z.string(),
 }) as unknown as z.ZodType<ReceiveDraftLine>;
 const draftSchema = z.object({
-  supplierId: z.string(), supplierName: z.string(), invoiceNumber: z.string(), purchasedAt: z.string(), supplierTotal: z.string().default(''), note: z.string(),
+  purchaseOrderId: z.string().default(''), supplierId: z.string(), supplierName: z.string(), invoiceNumber: z.string(), purchasedAt: z.string(), supplierTotal: z.string().default(''), note: z.string(),
   lines: z.array(lineSchema), updatedAt: z.string(),
 });
 const documentSchema = z.object({
-  version: z.union([z.literal(1), z.literal(2)]), active: draftSchema,
+  version: z.union([z.literal(1), z.literal(2), z.literal(3)]), active: draftSchema,
   held: z.array(z.object({ id: z.string().min(1), heldAt: z.string(), label: z.string().min(1), draft: draftSchema })),
-}).transform((document): PersistedReceiveDrafts => ({ ...document, version: 2 }));
+}).transform((document): PersistedReceiveDrafts => ({ ...document, version: 3 }));
 
 export function emptyReceiveDraft(now = new Date().toISOString()): ReceiveDraft {
-  return { supplierId: '', supplierName: '', invoiceNumber: '', purchasedAt: '', supplierTotal: '', note: '', lines: [], updatedAt: now };
+  return { purchaseOrderId: '', supplierId: '', supplierName: '', invoiceNumber: '', purchasedAt: '', supplierTotal: '', note: '', lines: [], updatedAt: now };
 }
 export function emptyReceiveDocument(now = new Date().toISOString()): PersistedReceiveDrafts {
-  return { version: 2, active: emptyReceiveDraft(now), held: [] };
+  return { version: 3, active: emptyReceiveDraft(now), held: [] };
+}
+export function purchaseOrderReceiveDraft(
+  order: PurchaseOrder,
+  shelf: readonly ShelfItem[],
+  now = new Date().toISOString(),
+): { draft: ReceiveDraft; unmatched: readonly PurchaseOrderItem[] } {
+  const unmatched: PurchaseOrderItem[] = [];
+  const lines: ReceiveDraftLine[] = [];
+  for (const item of order.items) {
+    if (Number(item.remainingQuantity) <= 0) continue;
+    const product = item.pharmacyProductId
+      ? shelf.find((row) => row.pharmacyProductId === item.pharmacyProductId)
+      : undefined;
+    if (product === undefined) { unmatched.push(item); continue; }
+    lines.push({
+      id: newId(), purchaseOrderItemId: item.id, orderedQuantity: item.remainingQuantity,
+      identity: { storeProductId: product.id }, name: product.name, sku: product.sku,
+      unit: product.unit, quantity: item.remainingQuantity, costMode: 'unit',
+      unitCost: item.estUnitCost ?? '', lineTotal: '', batchNumber: '', expiryDate: '',
+    });
+  }
+  return {
+    draft: {
+      ...emptyReceiveDraft(now), purchaseOrderId: order.id,
+      supplierId: order.supplierId ?? '', supplierName: order.supplierName ?? '', lines,
+    },
+    unmatched,
+  };
 }
 export function parseReceiveDrafts(raw: string): PersistedReceiveDrafts { return documentSchema.parse(JSON.parse(raw)); }
 export function receiveLineAmounts(line: Pick<ReceiveDraftLine, 'quantity' | 'costMode' | 'unitCost' | 'lineTotal'>): { unitCost: string; lineTotal: string; valid: boolean; hasCost: boolean } {
@@ -90,7 +121,7 @@ export function receiveTotals(lines: readonly ReceiveDraftLine[], supplierTotal:
 
 function key(scope: string): string { return `receive_drafts_v1:${scope}`; }
 function newId(): string { return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
-function snapshot(state: Pick<ReceiveDraftState, 'active' | 'held'>): PersistedReceiveDrafts { return { version: 2, active: state.active, held: state.held }; }
+function snapshot(state: Pick<ReceiveDraftState, 'active' | 'held'>): PersistedReceiveDrafts { return { version: 3, active: state.active, held: state.held }; }
 function label(draft: ReceiveDraft): string { return draft.supplierName.trim() || draft.lines[0]?.name || 'Held receipt'; }
 let chain: Promise<void> = Promise.resolve();
 function persist(scope: string, document: PersistedReceiveDrafts): void { chain = chain.then(() => localRecord(key(scope)).write(JSON.stringify(document))); }
@@ -118,22 +149,22 @@ export const useReceiveDrafts = create<ReceiveDraftState>()((set, get) => ({
   },
   updateActive: (change) => {
     const state = get(); if (!state.scopeKey || state.status !== 'ready') return;
-    const active = { ...change(state.active), updatedAt: new Date().toISOString() }; set({ active }); persist(state.scopeKey, { version: 2, active, held: state.held });
+    const active = { ...change(state.active), updatedAt: new Date().toISOString() }; set({ active }); persist(state.scopeKey, { version: 3, active, held: state.held });
   },
   holdActive: () => {
     const state = get(); if (!state.scopeKey || state.status !== 'ready' || state.active.lines.length === 0) return false;
     const now = new Date().toISOString(); const held = [{ id: newId(), heldAt: now, label: label(state.active), draft: { ...state.active, updatedAt: now } }, ...state.held];
-    const active = emptyReceiveDraft(now); set({ active, held, notice: 'Receipt held. Payment fields were cleared.' }); persist(state.scopeKey, { version: 2, active, held }); return true;
+    const active = emptyReceiveDraft(now); set({ active, held, notice: 'Receipt held. Payment fields were cleared.' }); persist(state.scopeKey, { version: 3, active, held }); return true;
   },
   resumeHeld: (id) => {
     const state = get(); if (!state.scopeKey || state.status !== 'ready') return false;
     const chosen = state.held.find((entry) => entry.id === id); if (!chosen) return false;
     const now = new Date().toISOString(); const rest = state.held.filter((entry) => entry.id !== id);
     const held = state.active.lines.length > 0 ? [{ id: newId(), heldAt: now, label: label(state.active), draft: state.active }, ...rest] : rest;
-    const active = { ...chosen.draft, updatedAt: now }; set({ active, held, notice: 'Held receipt resumed. Re-enter its payment.' }); persist(state.scopeKey, { version: 2, active, held }); return true;
+    const active = { ...chosen.draft, updatedAt: now }; set({ active, held, notice: 'Held receipt resumed. Re-enter its payment.' }); persist(state.scopeKey, { version: 3, active, held }); return true;
   },
-  deleteHeld: (id) => { const state = get(); if (!state.scopeKey) return; const held = state.held.filter((entry) => entry.id !== id); set({ held }); persist(state.scopeKey, { version: 2, active: state.active, held }); },
-  clearActive: () => { const state = get(); if (!state.scopeKey) return; const active = emptyReceiveDraft(); set({ active, notice: null }); persist(state.scopeKey, { version: 2, active, held: state.held }); },
+  deleteHeld: (id) => { const state = get(); if (!state.scopeKey) return; const held = state.held.filter((entry) => entry.id !== id); set({ held }); persist(state.scopeKey, { version: 3, active: state.active, held }); },
+  clearActive: () => { const state = get(); if (!state.scopeKey) return; const active = emptyReceiveDraft(); set({ active, notice: null }); persist(state.scopeKey, { version: 3, active, held: state.held }); },
   resetCorruptStorage: async () => { const state = get(); if (!state.scopeKey) return; const document = emptyReceiveDocument(); await localRecord(key(state.scopeKey)).write(JSON.stringify(document)); set({ status: 'ready', active: document.active, held: [], recoveryError: null }); },
   flush: async () => { await chain; },
 }));

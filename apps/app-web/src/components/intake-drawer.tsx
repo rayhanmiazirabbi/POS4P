@@ -1,7 +1,7 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
-import type { CatalogSearchItem, InventoryIntake, InventoryIntakeRequest } from '@pharmacy/api';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { CatalogSearchItem, InventoryIntake, InventoryIntakeRequest, PurchaseOrder } from '@pharmacy/api';
 import type { ShelfProduct } from '@pharmacy/sync';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
@@ -48,11 +48,16 @@ export function IntakeDrawer({
   const [advanced, setAdvanced] = useState(source === 'supplier_receive');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The purchase-order side of the drawer: '' means a fresh draft, an id means
+  // an existing one. The cashier decides whether stock walks in now or gets ordered.
+  const [poTarget, setPoTarget] = useState('');
+  const [orderedNote, setOrderedNote] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const title = selection.kind === 'custom' ? selection.name : selection.item.name;
   const isExisting = selection.kind === 'local' || global?.shopStatus === 'on_shelf';
   const unit = selection.kind === 'local' ? selection.item.unit ?? 'unit' : global?.packageUnit ?? customUnit;
   const online = typeof navigator === 'undefined' || navigator.onLine;
+  const queryClient = useQueryClient();
 
   const suppliers = useQuery({
     queryKey: ['suppliers', 'intake'],
@@ -60,6 +65,19 @@ export function IntakeDrawer({
     enabled: source === 'supplier_receive' && advanced,
     staleTime: 60_000,
   });
+
+  const draftOrders = useQuery({
+    queryKey: ['purchasing', 'purchase-orders', 'draft'],
+    queryFn: async () => (await pharmacyApi.purchaseOrders.list({ status: 'draft' }, { limit: 20 })).items,
+    enabled: source === 'opening_stock' && online,
+    staleTime: 15_000,
+  });
+
+  // An open draft is the likelier destination than a new one, so it becomes the
+  // default the moment the list lands. Only applied while untouched ('').
+  useEffect(() => {
+    if (poTarget === '' && (draftOrders.data ?? []).length > 0) setPoTarget(draftOrders.data![0]!.id);
+  }, [draftOrders.data, poTarget]);
 
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
@@ -101,6 +119,39 @@ export function IntakeDrawer({
     } finally { setBusy(false); }
   }
 
+  const canOrder = /^\d+(\.\d+)?$/.test(quantity) && Number(quantity) > 0;
+
+  /**
+   * The other exit for an out-of-shelf medicine: no stock arrives, the line goes
+   * on a purchase order instead. Catalog identity is carried when there is one,
+   * so `to-purchase` can resolve the line to a product later.
+   */
+  async function addToPurchaseOrder(): Promise<void> {
+    if (!canOrder || !online) return;
+    setBusy(true); setError(null); setOrderedNote(null);
+    const line = {
+      name: title,
+      quantity,
+      ...(unitCost ? { estUnitCost: unitCost } : {}),
+      ...(global?.catalogProductId ? { catalogProductId: global.catalogProductId } : {}),
+      ...(global?.pharmacyProductId ? { pharmacyProductId: global.pharmacyProductId } : {}),
+    };
+    try {
+      let orderId = poTarget;
+      if (orderId === '') {
+        const created = await pharmacyApi.purchaseOrders.create({ note: 'From POS out-of-stock' }, { idempotencyKey: newKey() });
+        orderId = created.data.id;
+        setPoTarget(orderId);
+      }
+      await pharmacyApi.purchaseOrders.addItem(orderId, line, { idempotencyKey: newKey() });
+      await queryClient.invalidateQueries({ queryKey: ['purchasing', 'purchase-orders'] });
+      const draft = (draftOrders.data ?? []).find((order: PurchaseOrder) => order.id === orderId);
+      setOrderedNote(`Added to draft order ${orderId.slice(0, 8)}${draft ? ` (${draft.items.length + 1} lines)` : ''}.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not add to the purchase order');
+    } finally { setBusy(false); }
+  }
+
   return (
     <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div
@@ -111,7 +162,7 @@ export function IntakeDrawer({
         aria-labelledby="intake-title"
         onKeyDown={(event) => {
           if (event.key === 'Escape') { event.preventDefault(); onClose(); return; }
-          if (event.key === 'Enter' && event.target instanceof HTMLElement && event.target.matches('input, select')) {
+          if (event.key === 'Enter' && event.target instanceof HTMLElement && event.target.matches('input')) {
             event.preventDefault();
             if (canSave && !busy && online) void save();
             return;
@@ -142,6 +193,29 @@ export function IntakeDrawer({
           </div>}
         </div>
         {error && <p className="form-error" role="alert">{error}</p>}
+        {orderedNote && <p className="finder-note" role="status">{orderedNote}</p>}
+        {source === 'opening_stock' && (
+          <div className="po-order-row">
+            <label className="po-order-target">
+              No stock now? Order it
+              <select className="field" value={poTarget} onChange={(event) => setPoTarget(event.target.value)} disabled={busy}>
+                <option value="">New draft order</option>
+                {(draftOrders.data ?? []).map((order) => (
+                  <option key={order.id} value={order.id}>Draft {order.id.slice(0, 8)} · {order.items.length} lines</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="quiet-action"
+              disabled={!canOrder || busy || !online}
+              title={!canOrder ? 'Enter a quantity first' : undefined}
+              onClick={() => void addToPurchaseOrder()}
+            >
+              {busy ? 'Adding…' : 'Add to purchase order'}
+            </button>
+          </div>
+        )}
         {!online && <p className="form-error" role="alert">Connect before adding or receiving a new medicine.</p>}
         <footer><button type="button" className="quiet-action" onClick={onClose}>Cancel</button><button type="button" className="primary-action" disabled={!canSave || busy || !online} onClick={() => void save()}>{busy ? 'Saving…' : source === 'opening_stock' ? 'Add stock and sell' : 'Receive stock'}</button></footer>
       </div>

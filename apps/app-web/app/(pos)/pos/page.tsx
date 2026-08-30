@@ -62,9 +62,16 @@ export default function PosPage(): ReactNode {
   const maySell = user !== null && can(user.role, 'sales.create');
   const mayReceive = user !== null && can(user.role, 'purchases.receive');
   const [mode, setMode] = useState<'sell' | 'receive'>(() => maySell ? 'sell' : 'receive');
+  const [purchaseOrderId, setPurchaseOrderId] = useState<string | null>(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sourceOrderId = params.get('purchaseOrderId');
+    if (params.get('mode') === 'receive' && mayReceive) setMode('receive');
+    setPurchaseOrderId(sourceOrderId);
+  }, [mayReceive]);
   useEffect(() => { if (!maySell && mayReceive) setMode('receive'); else if (!mayReceive && maySell) setMode('sell'); }, [mayReceive, maySell]);
   const modeSwitch = <CounterModeSwitch mode={mode} maySell={maySell} mayReceive={mayReceive} onMode={setMode} />;
-  return <div className="pos-mode-shell">{mode === 'receive' ? <ReceiveWorkspace modeSwitch={modeSwitch} /> : <SellWorkspace modeSwitch={modeSwitch} />}</div>;
+  return <div className="pos-mode-shell">{mode === 'receive' ? <ReceiveWorkspace modeSwitch={modeSwitch} purchaseOrderId={purchaseOrderId} /> : <SellWorkspace modeSwitch={modeSwitch} />}</div>;
 }
 
 function CounterModeSwitch({ mode, maySell, mayReceive, onMode }: { mode: 'sell' | 'receive'; maySell: boolean; mayReceive: boolean; onMode: (mode: 'sell' | 'receive') => void }): ReactNode {

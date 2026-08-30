@@ -473,13 +473,25 @@ async def test_reads_filter_and_hide_costs_from_non_managers(
 ) -> None:
     data, _ = await _create_draft(client, session, tenant)
     listing = await client.get(
-        "/purchases?status=draft&supplierId=" + data["supplierId"],
+        "/purchases?status=draft&supplierId="
+        + data["supplierId"]
+        + "&purchasedFrom="
+        + data["purchasedAt"]
+        + "&purchasedTo="
+        + data["purchasedAt"],
         headers=_headers(tenant),
     )
     assert listing.status_code == 200
     page = listing.json()["data"]
     assert page["total"] == 1
     assert page["items"][0]["totalAmount"] == "55.00"
+
+    outside_range = await client.get(
+        "/purchases?purchasedFrom=2099-01-01&purchasedTo=2099-12-31",
+        headers=_headers(tenant),
+    )
+    assert outside_range.status_code == 200
+    assert outside_range.json()["data"]["total"] == 0
 
     detail_owner = await client.get(f"/purchases/{data['id']}", headers=_headers(tenant))
     assert detail_owner.json()["data"]["items"][0]["unitCost"] == "5.50"

@@ -60,7 +60,7 @@ async def list_purchase_orders(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Envelope[Page[PurchaseOrderResponse]]:
     rows, total = await service.list_orders(session, context, status=po_status, limit=limit, offset=offset)
-    items = [service.order_response(row, []) for row in rows]
+    items = [await service.response_for_order(session, row, include_items=False) for row in rows]
     return Envelope(data=Page(items=items, total=total), request_id=request_id)
 
 

@@ -22,6 +22,8 @@ from app.models.base import (
 class PurchaseOrderStatus(str, Enum):
     DRAFT = "draft"
     ORDERED = "ordered"
+    PARTIALLY_RECEIVED = "partially_received"
+    RECEIVED = "received"
     CLOSED = "closed"
     CANCELLED = "cancelled"
 

@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.context import RequestContext
 from app.domains.products import PharmacyProduct, StoreProduct
 from app.domains.purchase_orders import PurchaseOrder, PurchaseOrderItem, PurchaseOrderStatus
+from app.domains.purchasing import Purchase, PurchaseItem, PurchaseStatus
+from app.domains.suppliers import Supplier
 from app.errors import Conflict, IdempotencyConflict, NotFound, ValidationError
 from app.models import Role
 from app.schemas.purchase_orders import (
@@ -67,12 +69,49 @@ async def _load_items(session: AsyncSession, po_id: UUID) -> list[PurchaseOrderI
     )
 
 
-def order_response(row: PurchaseOrder, items: list[PurchaseOrderItem]) -> PurchaseOrderResponse:
+async def _received_by_item(session: AsyncSession, po_id: UUID) -> dict[UUID, Decimal]:
+    rows = await session.execute(
+        select(PurchaseItem.purchase_order_item_id, func.sum(PurchaseItem.quantity))
+        .join(Purchase, Purchase.id == PurchaseItem.purchase_id)
+        .where(
+            Purchase.purchase_order_id == po_id,
+            Purchase.status == PurchaseStatus.CONFIRMED,
+            PurchaseItem.purchase_order_item_id.is_not(None),
+        )
+        .group_by(PurchaseItem.purchase_order_item_id)
+    )
+    return {item_id: Decimal(quantity) for item_id, quantity in rows if item_id is not None}
+
+
+def order_response(
+    row: PurchaseOrder,
+    items: list[PurchaseOrderItem],
+    *,
+    received: dict[UUID, Decimal],
+    supplier_name: str | None,
+    include_items: bool = True,
+) -> PurchaseOrderResponse:
+    ordered_quantity = sum((Decimal(item.quantity) for item in items), Decimal(0))
+    received_quantity = sum((received.get(item.id, Decimal(0)) for item in items), Decimal(0))
+    item_responses = []
+    if include_items:
+        for item in items:
+            received_quantity_for_item = received.get(item.id, Decimal(0))
+            item_responses.append(
+                PurchaseOrderItemResponse(
+                    **PurchaseOrderItemResponse.model_validate(item).model_dump(
+                        exclude={"received_quantity", "remaining_quantity"}
+                    ),
+                    received_quantity=received_quantity_for_item,
+                    remaining_quantity=max(Decimal(item.quantity) - received_quantity_for_item, Decimal(0)),
+                )
+            )
     return PurchaseOrderResponse(
         id=row.id,
         organization_id=row.organization_id,
         store_id=row.store_id,
         supplier_id=row.supplier_id,
+        supplier_name=supplier_name,
         status=row.status,
         expected_at=row.expected_at,
         note=row.note,
@@ -80,7 +119,29 @@ def order_response(row: PurchaseOrder, items: list[PurchaseOrderItem]) -> Purcha
         closed_at=row.closed_at,
         cancelled_at=row.cancelled_at,
         created_at=row.created_at,
-        items=[PurchaseOrderItemResponse.model_validate(item) for item in items],
+        item_count=len(items),
+        ordered_quantity=ordered_quantity,
+        received_quantity=received_quantity,
+        items=item_responses,
+    )
+
+
+async def response_for_order(
+    session: AsyncSession,
+    row: PurchaseOrder,
+    *,
+    include_items: bool,
+) -> PurchaseOrderResponse:
+    items = await _load_items(session, row.id)
+    supplier_name = None
+    if row.supplier_id is not None:
+        supplier_name = await session.scalar(select(Supplier.name).where(Supplier.id == row.supplier_id))
+    return order_response(
+        row,
+        items,
+        received=await _received_by_item(session, row.id),
+        supplier_name=supplier_name,
+        include_items=include_items,
     )
 
 
@@ -206,7 +267,7 @@ async def get_with_items(
     session: AsyncSession, context: RequestContext, po_id: UUID
 ) -> PurchaseOrderResponse:
     row = await load_po(session, context, po_id)
-    return order_response(row, await _load_items(session, row.id))
+    return await response_for_order(session, row, include_items=True)
 
 
 async def _draft_or_conflict(row: PurchaseOrder) -> PurchaseOrder:
@@ -322,8 +383,8 @@ async def close_order(
     session: AsyncSession, context: RequestContext, po_id: UUID, *, request_id: str
 ) -> PurchaseOrder:
     row = await load_po(session, context, po_id)
-    if row.status is not PurchaseOrderStatus.ORDERED:
-        raise Conflict("Only ordered purchase orders can be closed")
+    if row.status not in (PurchaseOrderStatus.ORDERED, PurchaseOrderStatus.PARTIALLY_RECEIVED):
+        raise Conflict("Only ordered or partially received purchase orders can be closed")
     row.status = PurchaseOrderStatus.CLOSED
     row.closed_at = utc_now()
     _track(

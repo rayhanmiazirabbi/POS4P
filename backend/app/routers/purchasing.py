@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, status
+from sqlalchemy import func, select
 
 from app.context import RequestContext
 from app.dependencies import (
@@ -14,6 +16,8 @@ from app.dependencies import (
     require_roles,
 )
 from app.domains.purchasing import PurchaseStatus
+from app.domains.purchasing import PurchaseItem
+from app.domains.suppliers import Supplier
 from app.errors import ValidationError
 from app.models import Role
 from app.schemas.base import Envelope, Page
@@ -60,12 +64,16 @@ def _purchase(
     items,
     *,
     include_costs: bool,
+    supplier_name: str | None = None,
+    item_count: int | None = None,
 ) -> PurchaseResponse:
     data = PurchaseResponse(
         id=purchase.id,
         organization_id=purchase.organization_id,
         store_id=purchase.store_id,
         supplier_id=purchase.supplier_id,
+        supplier_name=supplier_name,
+        purchase_order_id=purchase.purchase_order_id,
         status=purchase.status,
         invoice_number=purchase.invoice_number,
         receipt_number=purchase.receipt_number,
@@ -73,6 +81,7 @@ def _purchase(
         purchased_at=purchase.purchased_at,
         confirmed_at=purchase.confirmed_at,
         total_amount=Decimal(purchase.total_amount) if include_costs else None,
+        item_count=len(items) if item_count is None else item_count,
         items=[_item(item, include_costs=include_costs) for item in items],
     )
     return data
@@ -112,6 +121,8 @@ async def list_purchases(
     request_id: RequestIdDep,
     purchase_status: Annotated[PurchaseStatus | None, Query(alias="status")] = None,
     supplier_id: Annotated[UUID | None, Query(alias="supplierId")] = None,
+    purchased_from: Annotated[date | None, Query(alias="purchasedFrom")] = None,
+    purchased_to: Annotated[date | None, Query(alias="purchasedTo")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Envelope[Page[PurchaseResponse]]:
@@ -120,11 +131,29 @@ async def list_purchases(
         context,
         status=purchase_status,
         supplier_id=supplier_id,
+        purchased_from=purchased_from,
+        purchased_to=purchased_to,
         limit=limit,
         offset=offset,
     )
     include_costs = service.can_see_costs(context)
-    items = [_purchase(purchase, [], include_costs=include_costs) for purchase in rows]
+    items = []
+    for purchase in rows:
+        supplier_name = await session.scalar(
+            select(Supplier.name).where(Supplier.id == purchase.supplier_id)
+        )
+        item_count = await session.scalar(
+            select(func.count()).select_from(PurchaseItem).where(PurchaseItem.purchase_id == purchase.id)
+        )
+        items.append(
+            _purchase(
+                purchase,
+                [],
+                include_costs=include_costs,
+                supplier_name=supplier_name,
+                item_count=int(item_count or 0),
+            )
+        )
     return Envelope(data=Page(items=items, total=total), request_id=request_id)
 
 
@@ -137,8 +166,14 @@ async def read_purchase(
 ) -> Envelope[PurchaseResponse]:
     purchase, items = await service.get_purchase_with_items(session, context, purchase_id)
     include_costs = service.can_see_costs(context)
+    supplier_name = await session.scalar(
+        select(Supplier.name).where(Supplier.id == purchase.supplier_id)
+    )
     return Envelope(
-        data=_purchase(purchase, items, include_costs=include_costs), request_id=request_id
+        data=_purchase(
+            purchase, items, include_costs=include_costs, supplier_name=supplier_name
+        ),
+        request_id=request_id,
     )
 
 
@@ -211,4 +246,3 @@ async def create_return(
     returned = await service.return_purchase(session, context, purchase_id, payload, request_id=request_id)
     items = await service.get_purchase_with_items(session, context, returned.id)
     return Envelope(data=_purchase(returned, items[1], include_costs=True), request_id=request_id)
-

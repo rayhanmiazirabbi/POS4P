@@ -297,6 +297,7 @@ class ReorderSuggestionResponse(ApiModel):
     """Below-minimum product with a suggested order quantity attached."""
 
     store_product_id: UUID
+    pharmacy_product_id: UUID
     sku: str
     product_name: str
     available: Decimal

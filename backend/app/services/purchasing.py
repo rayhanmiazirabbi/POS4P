@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -13,6 +14,7 @@ from app.domains.catalog import CatalogBarcode, CatalogProduct
 from app.domains.inventory import InventoryMovementType
 from app.domains.products import PharmacyProduct
 from app.domains.purchasing import Purchase, PurchaseItem, PurchaseStatus
+from app.domains.purchase_orders import PurchaseOrder, PurchaseOrderItem, PurchaseOrderStatus
 from app.domains.suppliers import SupplierLedgerEntry, SupplierStatus
 from app.domains.sync import StoreSequence
 from app.errors import Conflict, NotFound, ValidationError
@@ -294,6 +296,44 @@ async def receive_purchase(
     if supplier.status is not SupplierStatus.ACTIVE:
         raise Conflict("Inactive suppliers cannot receive new purchases")
 
+    purchase_order: PurchaseOrder | None = None
+    order_items: dict[UUID, PurchaseOrderItem] = {}
+    if payload.purchase_order_id is not None:
+        purchase_order = await session.scalar(
+            select(PurchaseOrder)
+            .where(PurchaseOrder.id == payload.purchase_order_id)
+            .with_for_update()
+        )
+        if (
+            purchase_order is None
+            or purchase_order.organization_id != context.organization_id
+            or purchase_order.store_id != context.store_id
+        ):
+            raise NotFound("Purchase order not found")
+        if purchase_order.status not in (
+            PurchaseOrderStatus.ORDERED,
+            PurchaseOrderStatus.PARTIALLY_RECEIVED,
+        ):
+            raise Conflict("Only ordered or partially received purchase orders can be received")
+        if purchase_order.supplier_id is not None and purchase_order.supplier_id != supplier.id:
+            raise Conflict("Receipt supplier must match the purchase order supplier")
+        purchase_order.supplier_id = supplier.id
+        order_items = {
+            item.id: item
+            for item in await session.scalars(
+                select(PurchaseOrderItem).where(
+                    PurchaseOrderItem.purchase_order_id == purchase_order.id
+                )
+            )
+        }
+        linked = [item for item in payload.items if item.purchase_order_item_id is not None]
+        if not linked:
+            raise ValidationError("A purchase-order receipt must link at least one order line")
+        if any(item.purchase_order_item_id not in order_items for item in linked):
+            raise NotFound("Purchase order item not found")
+    elif any(item.purchase_order_item_id is not None for item in payload.items):
+        raise ValidationError("purchaseOrderId is required for linked order lines")
+
     configured = await allowed_payment_methods(session, context)
     seen: set[str] = set()
     for payment in payload.payments:
@@ -341,6 +381,7 @@ async def receive_purchase(
         organization_id=context.organization_id,
         store_id=context.store_id,
         supplier_id=supplier.id,
+        purchase_order_id=purchase_order.id if purchase_order is not None else None,
         status=PurchaseStatus.CONFIRMED,
         invoice_number=payload.invoice_number,
         receipt_number=receipt_number,
@@ -357,6 +398,7 @@ async def receive_purchase(
     for index, (item, shelf, _product, unit_cost, line_total) in enumerate(resolved, start=1):
         purchase_item = PurchaseItem(
             purchase_id=purchase.id,
+            purchase_order_item_id=item.purchase_order_item_id,
             store_product_id=shelf.id,
             quantity=item.quantity,
             unit_cost=unit_cost,
@@ -367,6 +409,54 @@ async def receive_purchase(
         session.add(purchase_item)
         purchase_items.append(purchase_item)
     await session.flush()
+
+    if purchase_order is not None:
+        received_rows = await session.execute(
+            select(PurchaseItem.purchase_order_item_id, func.sum(PurchaseItem.quantity))
+            .join(Purchase, Purchase.id == PurchaseItem.purchase_id)
+            .where(
+                Purchase.purchase_order_id == purchase_order.id,
+                Purchase.status == PurchaseStatus.CONFIRMED,
+                PurchaseItem.purchase_order_item_id.is_not(None),
+            )
+            .group_by(PurchaseItem.purchase_order_item_id)
+        )
+        received = {
+            item_id: Decimal(quantity)
+            for item_id, quantity in received_rows
+            if item_id is not None
+        }
+        complete = bool(order_items) and all(
+            received.get(item.id, Decimal(0)) >= Decimal(item.quantity)
+            for item in order_items.values()
+        )
+        purchase_order.status = (
+            PurchaseOrderStatus.RECEIVED if complete else PurchaseOrderStatus.PARTIALLY_RECEIVED
+        )
+        if complete:
+            purchase_order.closed_at = utc_now()
+        record_audit(
+            session,
+            context,
+            action="purchase_order.received" if complete else "purchase_order.partially_received",
+            entity_type="purchase_order",
+            entity_id=purchase_order.id,
+            request_id=request_id,
+            after=redact({"status": purchase_order.status.value, "purchase_id": str(purchase.id)}),
+        )
+        enqueue_outbox(
+            session,
+            organization_id=context.organization_id,
+            event_type="purchase_order.received" if complete else "purchase_order.partially_received",
+            aggregate_type="purchase_order",
+            aggregate_id=purchase_order.id,
+            payload={
+                "purchase_order_id": str(purchase_order.id),
+                "purchase_id": str(purchase.id),
+                "store_id": str(context.store_id),
+                "status": purchase_order.status.value,
+            },
+        )
 
     for purchase_item in purchase_items:
         await receive_for_item(
@@ -470,6 +560,7 @@ async def purchase_receipt(
     paid = sum((payment.amount for payment in payments), Decimal(0)).quantize(CENT)
     return PurchaseReceiptResponse(
         purchase_id=purchase.id,
+        purchase_order_id=purchase.purchase_order_id,
         receipt_number=purchase.receipt_number,
         supplier_id=supplier.id,
         supplier_name=supplier.name,
@@ -483,6 +574,7 @@ async def purchase_receipt(
         lines=[
             PurchaseReceiptLine(
                 purchase_item_id=item.id,
+                purchase_order_item_id=item.purchase_order_item_id,
                 store_product_id=shelf.id,
                 name=product.name,
                 sku=shelf.sku,
@@ -766,6 +858,8 @@ async def list_purchases(
     *,
     status: PurchaseStatus | None = None,
     supplier_id: UUID | None = None,
+    purchased_from: date | None = None,
+    purchased_to: date | None = None,
     limit: int = 25,
     offset: int = 0,
 ) -> tuple[list[Purchase], int]:
@@ -776,6 +870,10 @@ async def list_purchases(
         scope = (*scope, Purchase.status == status)
     if supplier_id is not None:
         scope = (*scope, Purchase.supplier_id == supplier_id)
+    if purchased_from is not None:
+        scope = (*scope, Purchase.purchased_at >= purchased_from)
+    if purchased_to is not None:
+        scope = (*scope, Purchase.purchased_at <= purchased_to)
     total = await session.scalar(select(func.count()).select_from(Purchase).where(*scope))
     rows = list(
         await session.scalars(

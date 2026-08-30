@@ -1,25 +1,25 @@
 'use client';
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { PurchaseReceiveRequest, Supplier } from '@pharmacy/api';
+import type { PurchaseOrderItem, PurchaseReceiveRequest, Supplier } from '@pharmacy/api';
 import type { ConfiguredPaymentMethod } from '@pharmacy/types';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 
 import { pharmacyApi } from '@/lib/api';
 import { decimalEntry } from '@/lib/numeric-input';
 import { defaultReceiptConfig, loadEffectiveReceiptConfig } from '@/lib/receipt';
-import { receiveLineAmounts, receiveTotals, useReceiveDrafts, type ReceiveCostMode, type ReceiveDraftLine } from '@/lib/receive-drafts';
+import { purchaseOrderReceiveDraft, receiveLineAmounts, receiveTotals, useReceiveDrafts, type ReceiveCostMode, type ReceiveDraftLine } from '@/lib/receive-drafts';
 import { useSession } from '@/lib/session';
 import { MedicineFinder, type MedicineSelection } from './medicine-finder';
 import { PurchaseReceiptDialog, type PrintablePurchaseReceipt } from './purchase-receipt-dialog';
 import { ShiftPanel } from './shift-panel';
 
 function id(): string { return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
-function baseLine(input: { identity: ReceiveDraftLine['identity']; name: string; sku?: string | null | undefined; unit?: string | null | undefined; shelf?: ReceiveDraftLine['shelf'] }): ReceiveDraftLine {
-  return { id: id(), identity: input.identity, ...(input.shelf ? { shelf: input.shelf } : {}), name: input.name, sku: input.sku ?? '', unit: input.unit ?? 'unit', quantity: '1', costMode: 'unit', unitCost: '', lineTotal: '', batchNumber: '', expiryDate: '' };
+function baseLine(input: { identity: ReceiveDraftLine['identity']; name: string; sku?: string | null | undefined; unit?: string | null | undefined; shelf?: ReceiveDraftLine['shelf']; purchaseOrderItemId?: string; orderedQuantity?: string; quantity?: string; unitCost?: string }): ReceiveDraftLine {
+  return { id: id(), identity: input.identity, ...(input.shelf ? { shelf: input.shelf } : {}), ...(input.purchaseOrderItemId ? { purchaseOrderItemId: input.purchaseOrderItemId } : {}), ...(input.orderedQuantity ? { orderedQuantity: input.orderedQuantity } : {}), name: input.name, sku: input.sku ?? '', unit: input.unit ?? 'unit', quantity: input.quantity ?? '1', costMode: 'unit', unitCost: input.unitCost ?? '', lineTotal: '', batchNumber: '', expiryDate: '' };
 }
 
-export function ReceiveWorkspace({ modeSwitch }: { modeSwitch: ReactNode }): ReactNode {
+export function ReceiveWorkspace({ modeSwitch, purchaseOrderId }: { modeSwitch: ReactNode; purchaseOrderId: string | null }): ReactNode {
   const { user } = useSession();
   const queryClient = useQueryClient();
   const draft = useReceiveDrafts((state) => state.active);
@@ -45,12 +45,17 @@ export function ReceiveWorkspace({ modeSwitch }: { modeSwitch: ReactNode }): Rea
   const [setup, setSetup] = useState<Exclude<MedicineSelection, { kind: 'local' }> | null>(null);
   const [detailForId, setDetailForId] = useState<string | null>(null);
   const [printable, setPrintable] = useState<PrintablePurchaseReceipt | null>(null);
+  const [unmatchedOrderItems, setUnmatchedOrderItems] = useState<readonly PurchaseOrderItem[]>([]);
+  const [matchingOrderItem, setMatchingOrderItem] = useState<PurchaseOrderItem | null>(null);
+  const [handoffPending, setHandoffPending] = useState(false);
+  const importedOrderRef = useRef<string | null>(null);
 
   const storeId = user?.storeId ?? null;
   useEffect(() => { if (user?.organizationId && storeId) void hydrate(user.organizationId, storeId); }, [hydrate, storeId, user?.organizationId]);
   useEffect(() => { const onHide = (): void => { void flush(); }; window.addEventListener('pagehide', onHide); return () => window.removeEventListener('pagehide', onHide); }, [flush]);
 
   const shelfQuery = useQuery({ queryKey: ['receive', 'shelf', storeId], enabled: storeId !== null, queryFn: async () => (await pharmacyApi.products.listCurrentStoreProducts()).items, staleTime: 30_000 });
+  const purchaseOrderQuery = useQuery({ queryKey: ['receive', 'purchase-order', purchaseOrderId], enabled: purchaseOrderId !== null, queryFn: async () => (await pharmacyApi.purchaseOrders.read(purchaseOrderId as string)).data, staleTime: 5_000 });
   const supplierQuery = useQuery({ queryKey: ['receive', 'suppliers'], queryFn: async () => (await pharmacyApi.suppliers.list({ limit: 100 })).items, staleTime: 30_000 });
   const settingsQuery = useQuery({ queryKey: ['organization', 'settings'], queryFn: async () => (await pharmacyApi.organizations.readSettings()).data.settings, staleTime: 60_000 });
   const cashSession = useQuery({ queryKey: ['pos', 'cash-session'], queryFn: async () => (await pharmacyApi.cashSessions.current()).data, staleTime: 5_000 });
@@ -78,12 +83,47 @@ export function ReceiveWorkspace({ modeSwitch }: { modeSwitch: ReactNode }): Rea
   const overpaid = Number(paid) > Number(totals.total);
   const online = typeof navigator === 'undefined' || navigator.onLine;
   const validLines = draft.lines.length > 0 && draft.lines.every((line) => receiveLineAmounts(line).valid);
+  const overReceivedLines = draft.lines.filter((line) => line.orderedQuantity !== undefined && Number(line.quantity) > Number(line.orderedQuantity));
   const canReview = draft.supplierId !== '' && validLines && totals.valid && !overpaid && (Number(cash || 0) === 0 || cashSession.data != null) && online;
   const activeMethodLabel = digitalMethods.find((method) => method.value === digitalMethod)?.label ?? digitalMethod;
+
+  function importPurchaseOrder(): void {
+    const order = purchaseOrderQuery.data;
+    const shelfRows = shelfQuery.data;
+    if (order === undefined || shelfRows === undefined) return;
+    const prepared = purchaseOrderReceiveDraft(order, shelfRows);
+    update(() => prepared.draft);
+    setUnmatchedOrderItems(prepared.unmatched);
+    setMatchingOrderItem(null);
+    setHandoffPending(false);
+    importedOrderRef.current = order.id;
+    resetTender();
+  }
+
+  useEffect(() => {
+    if (status !== 'ready' || purchaseOrderId === null || purchaseOrderQuery.data === undefined || shelfQuery.data === undefined) return;
+    if (draft.purchaseOrderId === purchaseOrderId || importedOrderRef.current === purchaseOrderId) { importedOrderRef.current = purchaseOrderId; return; }
+    if (draft.lines.length > 0) { setHandoffPending(true); return; }
+    importPurchaseOrder();
+  }, [draft.lines.length, draft.purchaseOrderId, purchaseOrderId, purchaseOrderQuery.data, shelfQuery.data, status]);
 
   function resetTender(): void { setCash(''); setDigital(''); setDigitalReference(''); }
   function addLine(line: ReceiveDraftLine): void { update((current) => ({ ...current, lines: [...current.lines, line] })); setError(null); }
   function chooseMedicine(selection: MedicineSelection): void {
+    if (matchingOrderItem !== null) {
+      const source = { purchaseOrderItemId: matchingOrderItem.id, orderedQuantity: matchingOrderItem.remainingQuantity, quantity: matchingOrderItem.remainingQuantity, unitCost: matchingOrderItem.estUnitCost ?? '' };
+      if (selection.kind === 'local') {
+        addLine(baseLine({ ...source, identity: { storeProductId: selection.item.id }, name: selection.item.name, sku: selection.item.sku, unit: selection.item.unit }));
+      } else if (selection.kind === 'catalog' && selection.item.shopStatus === 'on_shelf' && selection.item.storeProductId) {
+        addLine(baseLine({ ...source, identity: { storeProductId: selection.item.storeProductId }, name: selection.item.name, sku: selection.item.sku, unit: selection.item.packageUnit }));
+      } else {
+        setError('Match this order line to a product already on this branch shelf.');
+        return;
+      }
+      setUnmatchedOrderItems((current) => current.filter((item) => item.id !== matchingOrderItem.id));
+      setMatchingOrderItem(null);
+      return;
+    }
     if (selection.kind === 'local') { addLine(baseLine({ identity: { storeProductId: selection.item.id }, name: selection.item.name, sku: selection.item.sku, unit: selection.item.unit })); return; }
     if (selection.kind === 'catalog' && selection.item.shopStatus === 'on_shelf' && selection.item.storeProductId) {
       addLine(baseLine({ identity: { storeProductId: selection.item.storeProductId }, name: selection.item.name, sku: selection.item.sku, unit: selection.item.packageUnit })); return;
@@ -97,6 +137,7 @@ export function ReceiveWorkspace({ modeSwitch }: { modeSwitch: ReactNode }): Rea
     if (!canReview || !user) return;
     setBusy(true); setError(null);
     const request: PurchaseReceiveRequest = {
+      ...(draft.purchaseOrderId ? { purchaseOrderId: draft.purchaseOrderId } : {}),
       supplierId: draft.supplierId,
       ...(draft.invoiceNumber.trim() ? { invoiceNumber: draft.invoiceNumber.trim() } : {}),
       ...(draft.purchasedAt ? { purchasedAt: draft.purchasedAt } : {}),
@@ -105,7 +146,7 @@ export function ReceiveWorkspace({ modeSwitch }: { modeSwitch: ReactNode }): Rea
       items: draft.lines.map((line) => {
         const enteredCost = line.costMode === 'unit' ? line.unitCost : line.lineTotal;
         return {
-          ...line.identity, ...(line.shelf ? { shelf: line.shelf } : {}), quantity: line.quantity,
+          ...line.identity, ...(line.shelf ? { shelf: line.shelf } : {}), ...(line.purchaseOrderItemId ? { purchaseOrderItemId: line.purchaseOrderItemId } : {}), quantity: line.quantity,
           ...(enteredCost.trim() === '' ? {} : line.costMode === 'unit' ? { unitCost: line.unitCost } : { lineTotal: line.lineTotal }),
           ...(line.batchNumber.trim() ? { batchNumber: line.batchNumber.trim() } : {}),
           ...(line.expiryDate ? { expiryDate: line.expiryDate } : {}),
@@ -119,7 +160,7 @@ export function ReceiveWorkspace({ modeSwitch }: { modeSwitch: ReactNode }): Rea
     try {
       const response = await pharmacyApi.purchases.receive(request, { idempotencyKey: id() });
       setPrintable({ receipt: response.data, config: receiptSettings.data?.config ?? defaultReceiptConfig, organizationName: user.organizationName, storeName: receiptSettings.data?.storeName ?? user.storeName ?? '', staffName: user.user.displayName, locale: receiptSettings.data?.locale ?? 'en-BD', timezone: receiptSettings.data?.timezone ?? 'Asia/Dhaka' });
-      clear(); resetTender(); setReview(false);
+      clear(); resetTender(); setReview(false); setUnmatchedOrderItems([]); setMatchingOrderItem(null);
       await Promise.all([queryClient.invalidateQueries({ queryKey: ['receive'] }), queryClient.invalidateQueries({ queryKey: ['inventory'] }), queryClient.invalidateQueries({ queryKey: ['pos', 'shelf'] }), queryClient.invalidateQueries({ queryKey: ['pos', 'cash-session'] }), queryClient.invalidateQueries({ queryKey: ['purchasing'] })]);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not post this supplier receipt'); }
     finally { setBusy(false); }
@@ -132,7 +173,11 @@ export function ReceiveWorkspace({ modeSwitch }: { modeSwitch: ReactNode }): Rea
   return <>
     <main className="split-grid split-grid--counter receive-workspace">
       <section className="surface pos-shelf receive-search-pane">
-        <header className="pos-section-header"><div><span className="eyebrow">Supplier delivery</span><h1>Find received products</h1></div><span className="keyboard-hint">Online posting</span></header>
+        <header className="pos-section-header"><div><span className="eyebrow">{draft.purchaseOrderId ? `PO-${draft.purchaseOrderId.slice(0, 8)}` : 'Supplier delivery'}</span><h1>{matchingOrderItem ? `Match ${matchingOrderItem.name}` : 'Find received products'}</h1></div><span className="keyboard-hint">Online posting</span></header>
+        {purchaseOrderQuery.isPending && <p className="status-message status-message--muted">Loading purchase order…</p>}
+        {purchaseOrderQuery.isError && <p role="alert" className="status-message status-message--error">Could not load this purchase order.</p>}
+        {draft.purchaseOrderId && <p className="status-message cart-notice"><strong>Receiving against PO-{draft.purchaseOrderId.slice(0, 8)}</strong><span>Only posted quantities count toward its progress.</span></p>}
+        {unmatchedOrderItems.length > 0 && <section className="po-unmatched" aria-labelledby="po-unmatched-title"><div><strong id="po-unmatched-title">{unmatchedOrderItems.length} unmatched order {unmatchedOrderItems.length === 1 ? 'line' : 'lines'}</strong><span>Match a shelf product or skip it for this delivery.</span></div><ul>{unmatchedOrderItems.map((item) => <li key={item.id}><span><strong>{item.name}</strong><small>{item.remainingQuantity} remaining</small></span><div><button type="button" className="quiet-action" onClick={() => setMatchingOrderItem(item)}>Match</button><button type="button" className="quiet-action" onClick={() => { setUnmatchedOrderItems((current) => current.filter((entry) => entry.id !== item.id)); if (matchingOrderItem?.id === item.id) setMatchingOrderItem(null); }}>Skip</button></div></li>)}</ul></section>}
         <MedicineFinder products={products} actionLabel="Add to receipt" autoFocus onSelect={chooseMedicine} />
         {shelfQuery.isError && <p role="alert" className="form-error">Could not load this branch’s shelf.</p>}
       </section>
@@ -166,7 +211,8 @@ export function ReceiveWorkspace({ modeSwitch }: { modeSwitch: ReactNode }): Rea
     </main>
     <nav className="held-tabstrip" aria-label="Held receiving carts"><div className="held-strip-label"><strong>Held receipts</strong><span className="held-strip-count">{held.length}</span></div>{held.length === 0 ? <p className="held-strip-empty">Held supplier receipts appear here.</p> : <ul className="held-tabs">{held.map((entry) => <li className="held-tab receive-held-tab" key={entry.id}><button type="button" className="held-main" onClick={() => { resume(entry.id); resetTender(); }}><span><strong>{entry.label}</strong><small>{entry.draft.lines.length} lines · ৳{receiveTotals(entry.draft.lines, entry.draft.supplierTotal).total}</small></span></button><button type="button" className="line-remove" aria-label={`Delete held receipt ${entry.label}`} onClick={() => deleteHeld(entry.id)}>×</button></li>)}</ul>}{modeSwitch}<ShiftPanel onError={setError} /></nav>
     {setup && <ProductSetupDrawer selection={setup} onClose={() => setSetup(null)} onAdd={(line) => { addLine(line); setSetup(null); }} />}
-    {review && <ReviewDialog supplier={draft.supplierName} invoice={draft.invoiceNumber} lines={draft.lines.length} uncostedLines={uncostedLines} total={totals.total} paid={paid} credit={credit} busy={busy} onCancel={() => setReview(false)} onConfirm={() => void post()} />}
+    {handoffPending && <PurchaseOrderHandoffDialog orderId={purchaseOrderId ?? ''} onCancel={() => setHandoffPending(false)} onHoldAndLoad={() => { if (hold()) importPurchaseOrder(); }} />}
+    {review && <ReviewDialog supplier={draft.supplierName} invoice={draft.invoiceNumber} lines={draft.lines.length} uncostedLines={uncostedLines} overReceivedLines={overReceivedLines.length} total={totals.total} paid={paid} credit={credit} busy={busy} onCancel={() => setReview(false)} onConfirm={() => void post()} />}
     {printable && <PurchaseReceiptDialog printable={printable} onClose={() => setPrintable(null)} />}
   </>;
 }
@@ -228,8 +274,12 @@ function ProductSetupDrawer({ selection, onClose, onAdd }: { selection: Exclude<
   return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="intake-drawer" role="dialog" aria-modal="true"><header><div><span className="eyebrow">New shelf product</span><h2>{name}</h2><p>Set selling details before adding this delivery line.</p></div><button type="button" className="quiet-action" onClick={onClose}>Close</button></header><div className="drawer-fields"><label>Stock unit<input autoFocus className="field" value={unit} onChange={(event) => setUnit(event.target.value)} /></label><label>Selling price<input className="field" inputMode="decimal" value={salePrice} onChange={(event) => setSalePrice(decimalEntry(event.target.value))} /></label><div className="field-pair"><label>SKU<input className="field" placeholder="Generated if blank" value={sku} onChange={(event) => setSku(event.target.value)} /></label><label>Rack<input className="field" value={rack} onChange={(event) => setRack(event.target.value)} /></label></div><label>Barcode<input className="field" value={barcode} onChange={(event) => setBarcode(event.target.value)} /></label><label>Minimum stock<input className="field" inputMode="decimal" value={minimum} onChange={(event) => setMinimum(decimalEntry(event.target.value))} /></label><button type="button" className="primary-action" disabled={!ready} onClick={add}>Add to receipt</button></div></div></div>;
 }
 
-function ReviewDialog({ supplier, invoice, lines, uncostedLines, total, paid, credit, busy, onCancel, onConfirm }: { supplier: string; invoice: string; lines: number; uncostedLines: number; total: string; paid: string; credit: string; busy: boolean; onCancel: () => void; onConfirm: () => void }): ReactNode {
-  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="dialog-panel receive-review" role="dialog" aria-modal="true"><header className="dialog-header"><div><span className="eyebrow">Final review</span><h2>Post supplier receipt?</h2></div><button type="button" className="icon-action" onClick={onCancel}>×</button></header><dl><div><dt>Supplier</dt><dd>{supplier}</dd></div>{invoice && <div><dt>Invoice</dt><dd>{invoice}</dd></div>}<div><dt>Received lines</dt><dd>{lines}</dd></div><div><dt>Total</dt><dd>৳{total}</dd></div><div><dt>Paid now</dt><dd>৳{paid}</dd></div><div><dt>Supplier credit</dt><dd>৳{credit}</dd></div></dl>{uncostedLines > 0 && <p className="status-message status-message--warning">{uncostedLines} {uncostedLines === 1 ? 'item will' : 'items will'} be valued at ৳0.00, including for future supplier returns.</p>}<p>This posts stock, supplier balance, and payments together. It cannot be edited afterward.</p><footer><button type="button" className="quiet-action" onClick={onCancel}>Back</button><button autoFocus type="button" className="primary-action" disabled={busy} onClick={onConfirm}>{busy ? 'Posting…' : 'Post and generate voucher'}</button></footer></section></div>;
+function PurchaseOrderHandoffDialog({ orderId, onCancel, onHoldAndLoad }: { orderId: string; onCancel: () => void; onHoldAndLoad: () => void }): ReactNode {
+  return <div className="dialog-backdrop"><section className="dialog-panel receive-review" role="dialog" aria-modal="true" aria-labelledby="po-handoff-title"><header className="dialog-header"><div><span className="eyebrow">Purchase order</span><h2 id="po-handoff-title">Load PO-{orderId.slice(0, 8)}?</h2></div><button type="button" className="icon-action" aria-label="Cancel purchase order handoff" onClick={onCancel}>×</button></header><p>Your current receiving cart has products in it. Hold that cart before loading the order so nothing is overwritten.</p><footer><button type="button" className="quiet-action" onClick={onCancel}>Keep current cart</button><button autoFocus type="button" className="primary-action" onClick={onHoldAndLoad}>Hold and load order</button></footer></section></div>;
+}
+
+function ReviewDialog({ supplier, invoice, lines, uncostedLines, overReceivedLines, total, paid, credit, busy, onCancel, onConfirm }: { supplier: string; invoice: string; lines: number; uncostedLines: number; overReceivedLines: number; total: string; paid: string; credit: string; busy: boolean; onCancel: () => void; onConfirm: () => void }): ReactNode {
+  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="dialog-panel receive-review" role="dialog" aria-modal="true"><header className="dialog-header"><div><span className="eyebrow">Final review</span><h2>Post supplier receipt?</h2></div><button type="button" className="icon-action" onClick={onCancel}>×</button></header><dl><div><dt>Supplier</dt><dd>{supplier}</dd></div>{invoice && <div><dt>Invoice</dt><dd>{invoice}</dd></div>}<div><dt>Received lines</dt><dd>{lines}</dd></div><div><dt>Total</dt><dd>৳{total}</dd></div><div><dt>Paid now</dt><dd>৳{paid}</dd></div><div><dt>Supplier credit</dt><dd>৳{credit}</dd></div></dl>{uncostedLines > 0 && <p className="status-message status-message--warning">{uncostedLines} {uncostedLines === 1 ? 'item will' : 'items will'} be valued at ৳0.00, including for future supplier returns.</p>}{overReceivedLines > 0 && <p className="status-message status-message--warning">{overReceivedLines} {overReceivedLines === 1 ? 'line is' : 'lines are'} above the remaining ordered quantity. The actual quantity will be recorded.</p>}<p>This posts stock, supplier balance, and payments together. It cannot be edited afterward.</p><footer><button type="button" className="quiet-action" onClick={onCancel}>Back</button><button autoFocus type="button" className="primary-action" disabled={busy} onClick={onConfirm}>{busy ? 'Posting…' : 'Post and generate voucher'}</button></footer></section></div>;
 }
 
 function ReceiveIcon({ name }: { name: 'cash' | 'phone' | 'wallet' | 'calendar' | 'supplier' | 'search' }): ReactNode {

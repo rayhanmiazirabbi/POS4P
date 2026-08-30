@@ -33,6 +33,9 @@ class Purchase(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id"), nullable=False)
+    purchase_order_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("purchase_orders.id"), index=True
+    )
     status: Mapped[PurchaseStatus] = mapped_column(default=PurchaseStatus.DRAFT, nullable=False)
     invoice_number: Mapped[str | None] = mapped_column(String(100))
     receipt_number: Mapped[str | None] = mapped_column(String(80))
@@ -47,6 +50,9 @@ class PurchaseItem(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "purchase_items"
 
     purchase_id: Mapped[UUID] = mapped_column(ForeignKey("purchases.id"), nullable=False)
+    purchase_order_item_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("purchase_order_items.id"), index=True
+    )
     store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(quantity_column(), nullable=False)
     unit_cost: Mapped[Decimal] = mapped_column(money_column(), nullable=False)

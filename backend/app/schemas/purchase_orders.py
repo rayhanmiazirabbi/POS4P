@@ -59,6 +59,8 @@ class PurchaseOrderItemResponse(ApiModel):
     name: str
     quantity: Decimal
     est_unit_cost: Decimal | None
+    received_quantity: Decimal = Decimal(0)
+    remaining_quantity: Decimal = Decimal(0)
 
 
 class PurchaseOrderResponse(ApiModel):
@@ -66,6 +68,7 @@ class PurchaseOrderResponse(ApiModel):
     organization_id: UUID
     store_id: UUID
     supplier_id: UUID | None
+    supplier_name: str | None = None
     status: PurchaseOrderStatus
     expected_at: date | None
     note: str | None
@@ -73,6 +76,9 @@ class PurchaseOrderResponse(ApiModel):
     closed_at: datetime | None
     cancelled_at: datetime | None
     created_at: datetime
+    item_count: int = 0
+    ordered_quantity: Decimal = Decimal(0)
+    received_quantity: Decimal = Decimal(0)
     items: list[PurchaseOrderItemResponse] = Field(default_factory=list)
 
 

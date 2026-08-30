@@ -344,3 +344,100 @@ async def test_second_convert_of_a_closed_order_conflicts(
     assert second.status_code == 409
     total_purchases = await session.scalar(select(func.count()).select_from(Purchase))
     assert int(total_purchases or 0) == 1
+
+
+# --- receiving reconciliation ---------------------------------------------------
+
+
+async def test_partial_receipts_track_remaining_and_finish_the_order(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    supplier = await _make_supplier(session, tenant)
+    shelf = await _make_store_product(session, tenant, sku="PO-PARTIAL")
+    await session.commit()
+    created = await client.post(
+        "/purchase-orders",
+        json={
+            "supplierId": str(supplier.id),
+            "items": [{
+                "name": "Partial delivery",
+                "quantity": "10",
+                "estUnitCost": "5.00",
+                "pharmacyProductId": str(shelf.pharmacy_product_id),
+            }],
+        },
+        headers=_headers(tenant),
+    )
+    order = created.json()["data"]
+    item_id = order["items"][0]["id"]
+    await client.post(f"/purchase-orders/{order['id']}/order", headers=_headers(tenant))
+
+    first = await client.post(
+        "/purchases/receive",
+        json={
+            "purchaseOrderId": order["id"],
+            "supplierId": str(supplier.id),
+            "items": [{
+                "purchaseOrderItemId": item_id,
+                "storeProductId": str(shelf.id),
+                "quantity": "4",
+                "unitCost": "5.00",
+            }],
+        },
+        headers={**_headers(tenant), "Idempotency-Key": "po-partial-receive-000001"},
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["data"]["purchaseOrderId"] == order["id"]
+    detail = await client.get(f"/purchase-orders/{order['id']}", headers=_headers(tenant))
+    assert detail.json()["data"]["status"] == "partially_received"
+    assert detail.json()["data"]["items"][0]["receivedQuantity"] == "4.0000"
+    assert detail.json()["data"]["items"][0]["remainingQuantity"] == "6.0000"
+
+    second = await client.post(
+        "/purchases/receive",
+        json={
+            "purchaseOrderId": order["id"],
+            "supplierId": str(supplier.id),
+            "items": [{
+                "purchaseOrderItemId": item_id,
+                "storeProductId": str(shelf.id),
+                "quantity": "7",
+                "unitCost": "5.00",
+            }],
+        },
+        headers={**_headers(tenant), "Idempotency-Key": "po-final-receive-0000001"},
+    )
+    assert second.status_code == 201, second.text
+    complete = await client.get(f"/purchase-orders/{order['id']}", headers=_headers(tenant))
+    assert complete.json()["data"]["status"] == "received"
+    assert complete.json()["data"]["items"][0]["receivedQuantity"] == "11.0000"
+    assert complete.json()["data"]["items"][0]["remainingQuantity"] == "0"
+
+
+async def test_order_receipt_rejects_an_item_from_another_order(
+    client: Any, session: Any, tenant: dict[str, Any]
+) -> None:
+    supplier = await _make_supplier(session, tenant)
+    shelf = await _make_store_product(session, tenant, sku="PO-WRONG-LINE")
+    await session.commit()
+    first = await _create_po(client, tenant, items=[{
+        "name": "First", "quantity": "1", "pharmacyProductId": str(shelf.pharmacy_product_id)
+    }])
+    second = await _create_po(client, tenant, items=[{
+        "name": "Second", "quantity": "1", "pharmacyProductId": str(shelf.pharmacy_product_id)
+    }])
+    await client.post(f"/purchase-orders/{first['id']}/order", headers=_headers(tenant))
+    response = await client.post(
+        "/purchases/receive",
+        json={
+            "purchaseOrderId": first["id"],
+            "supplierId": str(supplier.id),
+            "items": [{
+                "purchaseOrderItemId": second["items"][0]["id"],
+                "storeProductId": str(shelf.id),
+                "quantity": "1",
+            }],
+        },
+        headers={**_headers(tenant), "Idempotency-Key": "po-wrong-line-0000000001"},
+    )
+    assert response.status_code == 404

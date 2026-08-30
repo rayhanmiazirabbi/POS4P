@@ -469,6 +469,7 @@ async def list_reorder_suggestions(
     items = [
         ReorderSuggestionResponse(
             store_product_id=product.id,
+            pharmacy_product_id=product.pharmacy_product_id,
             sku=product.sku,
             product_name=pharmacy_product.name if pharmacy_product else product.sku,
             available=available,
