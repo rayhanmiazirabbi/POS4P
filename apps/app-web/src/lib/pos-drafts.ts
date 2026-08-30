@@ -16,6 +16,9 @@ export type CartLine = {
   unitPrice: string;
   discountMode: DiscountInput['mode'];
   discountValue: string;
+  /** Where to physically pick the item; optional because catalogue-adopted
+   *  lines carry no rack until the shelf record has one. */
+  rack?: string | null | undefined;
   unavailable?: boolean | undefined;
 };
 
@@ -55,6 +58,7 @@ const cartLineSchema = z.object({
   unitPrice: z.string().regex(/^\d+(?:\.\d+)?$/),
   discountMode: z.enum(['percentage', 'flat']),
   discountValue: z.string(),
+  rack: z.string().nullable().optional(),
   unavailable: z.boolean().optional(),
 });
 
@@ -166,6 +170,9 @@ export function reconcileDraft(draft: PosDraft, products: readonly ShelfProduct[
       name: product.name,
       unit: product.unit ?? line.unit,
       unitPrice: product.salePrice,
+      // Rack travels with the shelf, not the cart: a rename or re-slotting
+      // reaches held carts through the same reconcile that fixes prices.
+      rack: product.rack ?? null,
       unavailable: false,
     };
   });

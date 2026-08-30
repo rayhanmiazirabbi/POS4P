@@ -54,6 +54,9 @@ class InventoryMovement(AppendOnlyMixin, StoreScopedMixin, UUIDPrimaryKeyMixin, 
     reference_type: Mapped[str | None] = mapped_column(String(80))
     reference_id: Mapped[UUID | None] = mapped_column()
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Free-text why for corrections and damage: the shelf ledger answers "what
+    # moved", this answers "who decided and why" without an audit-log lookup.
+    reason: Mapped[str | None] = mapped_column(String(280))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     actor_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
 
@@ -114,6 +117,40 @@ class StockTransferItem(UUIDPrimaryKeyMixin, Base):
     transfer_id: Mapped[UUID] = mapped_column(ForeignKey("stock_transfers.id"), nullable=False)
     store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(quantity_column(), nullable=False)
+
+
+class StocktakeStatus(str, Enum):
+    DRAFT = "draft"
+    COMPLETED = "completed"
+
+
+class Stocktake(StoreScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A physical count session: counted lines in, variance corrections out.
+
+    The session stores only what the counter typed. System quantities are read
+    at finalize time, so a line counted against stock that moved during the
+    count is corrected against reality, not against a stale snapshot.
+    """
+
+    __tablename__ = "stocktakes"
+    __table_args__ = (Index("ix_stocktakes_store_status", "store_id", "status"),)
+
+    note: Mapped[str | None] = mapped_column(String(280))
+    status: Mapped[StocktakeStatus] = mapped_column(
+        enum_column(StocktakeStatus), nullable=False, default=StocktakeStatus.DRAFT
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+
+
+class StocktakeItem(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "stocktake_items"
+    __table_args__ = (UniqueConstraint("stocktake_id", "store_product_id"),)
+
+    organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
+    stocktake_id: Mapped[UUID] = mapped_column(ForeignKey("stocktakes.id"), nullable=False)
+    store_product_id: Mapped[UUID] = mapped_column(ForeignKey("store_products.id"), nullable=False)
+    counted_quantity: Mapped[Decimal] = mapped_column(quantity_column(), nullable=False)
 
 
 @dataclass(frozen=True)

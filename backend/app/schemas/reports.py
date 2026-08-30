@@ -135,3 +135,50 @@ class TopCustomerRow(ApiModel):
     customer_name: str
     sale_count: int
     total_spent: Decimal
+
+
+# --- inventory valuation + COGS ---------------------------------------------------
+
+
+class ValuationLine(ApiModel):
+    """Stock on hand priced at batch cost; ``value_at_cost`` sums its batches."""
+
+    store_product_id: UUID
+    sku: str
+    product_name: str
+    rack: str | None
+    on_hand: Decimal
+    value_at_cost: Decimal
+
+
+class ValuationResponse(ApiModel):
+    store_id: UUID
+    total_value_at_cost: Decimal
+    lines: list[ValuationLine]
+
+
+class DeadStockLine(ApiModel):
+    """Held stock with no sale movement since ``last_sold_at`` (or ever)."""
+
+    store_product_id: UUID
+    sku: str
+    product_name: str
+    on_hand: Decimal
+    value_at_cost: Decimal
+    last_sold_at: datetime | None
+
+
+class DeadStockResponse(ApiModel):
+    store_id: UUID
+    idle_days: int
+    total_value_at_cost: Decimal
+    lines: list[DeadStockLine]
+
+
+class CogsResponse(ApiModel):
+    """Batch cost of goods sold in a window, net of stock restored by returns."""
+
+    store_id: UUID
+    start: datetime
+    end: datetime
+    cost_of_goods_sold: Decimal

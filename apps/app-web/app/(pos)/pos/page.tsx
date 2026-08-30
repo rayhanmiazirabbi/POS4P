@@ -376,9 +376,9 @@ export default function PosPage(): ReactNode {
     setCart((current) => {
       const existing = current.find((line) => line.storeProductId === product.id);
       if (existing) {
-        return current.map((line) => (line.storeProductId === product.id ? { ...line, quantity: line.quantity + 1 } : line));
+        return current.map((line) => (line.storeProductId === product.id ? { ...line, quantity: line.quantity + 1, rack: product.rack ?? line.rack } : line));
       }
-      return [...current, { storeProductId: product.id, sku: product.sku, name: product.name, unit: product.unit ?? 'unit', quantity: 1, unitPrice: product.salePrice, discountMode: 'percentage', discountValue: '' }];
+      return [...current, { storeProductId: product.id, sku: product.sku, name: product.name, unit: product.unit ?? 'unit', quantity: 1, unitPrice: product.salePrice, discountMode: 'percentage', discountValue: '', rack: product.rack ?? null }];
     });
   }
 
@@ -713,7 +713,7 @@ export default function PosPage(): ReactNode {
           {cart.map((line, index) => (
             <li key={line.storeProductId} className={`cart-adjustment-row${line.unavailable ? ' cart-adjustment-row--unavailable' : ''}`}>
               <span className="line-number" aria-hidden="true">{index + 1}</span>
-              <span className="line-details"><strong>{line.name}</strong><small className={line.unavailable ? 'line-unavailable' : ''}>{line.unavailable ? 'Unavailable — remove' : `৳${line.unitPrice} / ${line.unit}`}</small></span>
+              <span className="line-details"><strong>{line.name}</strong><small className={line.unavailable ? 'line-unavailable' : ''}>{line.unavailable ? 'Unavailable — remove' : `${line.rack ? `Rack ${line.rack} · ` : ''}৳${line.unitPrice} / ${line.unit}`}</small></span>
               <div className="quantity-stepper" aria-label={`Quantity for ${line.name}`}>
                 <button type="button" tabIndex={-1} aria-label={`Decrease ${line.name} quantity`} disabled={line.quantity <= 1} onClick={() => setQuantity(line.storeProductId, String(line.quantity - 1))}>−</button>
                 <input

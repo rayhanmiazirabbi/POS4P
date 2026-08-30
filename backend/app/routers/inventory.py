@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
@@ -9,10 +10,10 @@ from sqlalchemy import select
 
 from app.context import RequestContext
 from app.dependencies import ContextDep, RequestIdDep, SessionDep, require_roles
-from app.domains.inventory import InventoryBalance, InventoryBatch
+from app.domains.inventory import InventoryBalance, InventoryBatch, InventoryMovementType
 from app.errors import ValidationError
 from app.models import Role
-from app.schemas.base import Envelope
+from app.schemas.base import Envelope, Page
 from app.schemas.inventory import (
     AdjustmentRequest,
     BalanceResponse,
@@ -22,11 +23,20 @@ from app.schemas.inventory import (
     InventoryIntakeRequest,
     InventoryIntakeResponse,
     LowStockResponse,
+    MovementLedgerResponse,
     MovementResponse,
+    RackRenameRequest,
+    RackResponse,
     RebuildResultResponse,
     ReceiveBatchRequest,
     ReceiveBatchResponse,
+    ReorderSuggestionResponse,
     StockResponse,
+    StocktakeCreateRequest,
+    StocktakeLineRequest,
+    StocktakeLineResponse,
+    StocktakeResponse,
+    StocktakeSummaryResponse,
     TransferCreateRequest,
     TransferResponse,
 )
@@ -353,3 +363,261 @@ async def cancel_transfer(
 ) -> Envelope[TransferResponse]:
     transfer = await service.cancel_transfer(session, context, transfer_id, request_id=request_id)
     return Envelope(data=TransferResponse.model_validate(transfer), request_id=request_id)
+
+
+# --- movement ledger ------------------------------------------------------------
+
+
+@router.get("/movements", response_model=Envelope[Page[MovementLedgerResponse]])
+async def list_movements(
+    session: SessionDep,
+    context: ContextDep,
+    request_id: RequestIdDep,
+    store_product_id: Annotated[UUID | None, Query(alias="storeProductId")] = None,
+    movement_type: Annotated[str | None, Query(alias="movementType")] = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Envelope[Page[MovementLedgerResponse]]:
+    """The append-only stock ledger, newest first, for the caller's branch."""
+    parsed_type = InventoryMovementType(movement_type) if movement_type else None
+    rows, total = await service.list_movements(
+        session,
+        context,
+        store_product_id=store_product_id,
+        movement_type=parsed_type,
+        start=start,
+        end=end,
+        limit=limit,
+        offset=offset,
+    )
+    items = [
+        MovementLedgerResponse(
+            id=movement.id,
+            store_product_id=movement.store_product_id,
+            sku=product.sku,
+            product_name=pharmacy_product.name if pharmacy_product else product.sku,
+            batch_id=movement.batch_id,
+            batch_number=batch.batch_number if batch else None,
+            movement_type=movement.movement_type,
+            quantity=movement.quantity,
+            reason=movement.reason,
+            reference_type=movement.reference_type,
+            occurred_at=movement.occurred_at,
+        )
+        for movement, product, pharmacy_product, batch in rows
+    ]
+    return Envelope(data=Page(items=items, total=total), request_id=request_id)
+
+
+# --- racks ----------------------------------------------------------------------
+
+
+@router.get("/racks", response_model=Envelope[list[RackResponse]])
+async def list_racks(
+    session: SessionDep,
+    context: ContextDep,
+    request_id: RequestIdDep,
+    store_id: Annotated[UUID, Query(alias="storeId")],
+) -> Envelope[list[RackResponse]]:
+    """Distinct rack labels on the branch's active shelf, with item counts."""
+    rows = await service.list_racks(session, context, store_id)
+    return Envelope(
+        data=[RackResponse(rack=label, item_count=count) for label, count in rows],
+        request_id=request_id,
+    )
+
+
+@router.post(
+    "/racks/rename",
+    response_model=Envelope[RackResponse],
+    summary="Move every item on one rack label to another (owner/manager only)",
+)
+async def rename_rack(
+    payload: RackRenameRequest,
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[RackResponse]:
+    moved = await service.rename_rack(
+        session,
+        context,
+        payload.store_id,
+        from_rack=payload.from_rack,
+        to_rack=payload.to_rack,
+        request_id=request_id,
+    )
+    return Envelope(
+        data=RackResponse(rack=payload.to_rack.strip(), item_count=moved),
+        request_id=request_id,
+    )
+
+
+# --- reorder suggestions ----------------------------------------------------------
+
+
+@router.get("/reorder-suggestions", response_model=Envelope[list[ReorderSuggestionResponse]])
+async def list_reorder_suggestions(
+    session: SessionDep,
+    context: ContextDep,
+    request_id: RequestIdDep,
+    store_id: Annotated[UUID, Query(alias="storeId")],
+) -> Envelope[list[ReorderSuggestionResponse]]:
+    """Below-minimum products with a suggested refill quantity."""
+    rows = await service.reorder_suggestions(session, context, store_id)
+    items = [
+        ReorderSuggestionResponse(
+            store_product_id=product.id,
+            sku=product.sku,
+            product_name=pharmacy_product.name if pharmacy_product else product.sku,
+            available=available,
+            minimum_stock=Decimal(product.minimum_stock),
+            suggested_quantity=suggested,
+        )
+        for product, pharmacy_product, available, suggested in rows
+    ]
+    return Envelope(data=items, request_id=request_id)
+
+
+# --- stocktakes -----------------------------------------------------------------
+
+
+@router.get("/stocktakes", response_model=Envelope[list[StocktakeResponse]])
+async def list_stocktakes(
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Envelope[list[StocktakeResponse]]:
+    """Count sessions for the caller's branch, newest first (without lines)."""
+    rows, _total = await service.list_stocktakes(session, context, limit=limit, offset=offset)
+    return Envelope(
+        data=[
+            StocktakeResponse(
+                id=stocktake.id,
+                store_id=stocktake.store_id,
+                status=stocktake.status,
+                note=stocktake.note,
+                created_at=stocktake.created_at,
+                completed_at=stocktake.completed_at,
+                lines=[],
+            )
+            for stocktake in rows
+        ],
+        request_id=request_id,
+    )
+
+
+@router.post(
+    "/stocktakes",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Envelope[StocktakeResponse],
+    summary="Open a physical count session (owner/manager only)",
+)
+async def create_stocktake(
+    payload: StocktakeCreateRequest,
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[StocktakeResponse]:
+    stocktake = await service.create_stocktake(session, context, note=payload.note, request_id=request_id)
+    return Envelope(
+        data=StocktakeResponse(
+            id=stocktake.id,
+            store_id=stocktake.store_id,
+            status=stocktake.status,
+            note=stocktake.note,
+            created_at=stocktake.created_at,
+            completed_at=stocktake.completed_at,
+            lines=[],
+        ),
+        request_id=request_id,
+    )
+
+
+@router.get("/stocktakes/{stocktake_id}", response_model=Envelope[StocktakeResponse])
+async def read_stocktake(
+    stocktake_id: UUID,
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[StocktakeResponse]:
+    """One count session with each line's counted vs system quantity."""
+    stocktake, lines = await service.stocktake_view(session, context, stocktake_id)
+    return Envelope(data=_stocktake_response(stocktake, lines), request_id=request_id)
+
+
+def _stocktake_response(
+    stocktake: service.Stocktake,
+    lines: list[tuple[service.StocktakeItem, service.StoreProduct, service.PharmacyProduct | None, Decimal]],
+) -> StocktakeResponse:
+    return StocktakeResponse(
+        id=stocktake.id,
+        store_id=stocktake.store_id,
+        status=stocktake.status,
+        note=stocktake.note,
+        created_at=stocktake.created_at,
+        completed_at=stocktake.completed_at,
+        lines=[
+            StocktakeLineResponse(
+                store_product_id=item.store_product_id,
+                sku=product.sku,
+                product_name=pharmacy_product.name if pharmacy_product else product.sku,
+                counted_quantity=item.counted_quantity,
+                system_quantity=Decimal(item.counted_quantity) + variance,
+                variance=variance,
+            )
+            for item, product, pharmacy_product, variance in lines
+        ],
+    )
+
+
+@router.post(
+    "/stocktakes/{stocktake_id}/items",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Envelope[StocktakeResponse],
+    summary="Record one counted line; recounting a line replaces it",
+)
+async def upsert_stocktake_line(
+    stocktake_id: UUID,
+    payload: StocktakeLineRequest,
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[StocktakeResponse]:
+    await service.upsert_stocktake_line(
+        session,
+        context,
+        stocktake_id,
+        store_product_id=payload.store_product_id,
+        counted_quantity=payload.counted_quantity,
+    )
+    stocktake, lines = await service.stocktake_view(session, context, stocktake_id)
+    return Envelope(data=_stocktake_response(stocktake, lines), request_id=request_id)
+
+
+@router.post(
+    "/stocktakes/{stocktake_id}/finalize",
+    response_model=Envelope[StocktakeSummaryResponse],
+    summary="Book every variance as an adjustment and close the session",
+)
+async def finalize_stocktake(
+    stocktake_id: UUID,
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[StocktakeSummaryResponse]:
+    stocktake, corrected, unchanged = await service.finalize_stocktake(
+        session, context, stocktake_id, request_id=request_id
+    )
+    _stocktake, lines = await service.stocktake_view(session, context, stocktake_id)
+    return Envelope(
+        data=StocktakeSummaryResponse(
+            stocktake=_stocktake_response(stocktake, lines),
+            corrected_lines=corrected,
+            unchanged_lines=unchanged,
+        ),
+        request_id=request_id,
+    )

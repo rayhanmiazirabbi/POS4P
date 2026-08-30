@@ -62,6 +62,90 @@ export default function PurchasingPage(): ReactNode {
   );
 }
 
+/**
+ * What to buy next, straight off the shelf minimums.
+ *
+ * The suggestion endpoint refills to twice the minimum, so accepting it clears
+ * the shortage and leaves a working buffer rather than landing the branch back
+ * at the minimum the following week. One click turns the list into a draft
+ * purchase order; costs and batches are entered when the goods actually arrive.
+ */
+function ReorderPanel({ onDraftCreated }: { onDraftCreated: (orderId: string) => void }): ReactNode {
+  const { user } = useSession();
+  const queryClient = useQueryClient();
+  const storeId = user?.storeId ?? null;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const suggestions = useQuery({
+    queryKey: ['inventory', 'reorder', storeId],
+    enabled: storeId !== null,
+    queryFn: async () => (await pharmacyApi.inventory.reorderSuggestions(storeId as string)).data,
+    staleTime: 30_000,
+  });
+  const items = suggestions.data ?? [];
+
+  async function createDraft(): Promise<void> {
+    if (storeId === null || items.length === 0) return;
+    setBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      const created = await pharmacyApi.purchaseOrders.create({ note: 'From reorder suggestions' });
+      const orderId = created.data.id;
+      for (const item of items) {
+        await pharmacyApi.purchaseOrders.addItem(orderId, {
+          name: item.productName,
+          quantity: item.suggestedQuantity,
+        });
+      }
+      setNote(`Draft ${orderId.slice(0, 8)} created with ${items.length} line${items.length === 1 ? '' : 's'}.`);
+      await queryClient.invalidateQueries({ queryKey: ['purchasing', 'purchase-orders'] });
+      onDraftCreated(orderId);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The draft could not be created');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="surface" style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
+      <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Reorder suggestions ({items.length})</h2>
+      {suggestions.isError && (
+        <p role="alert" style={{ margin: 0, color: colors.danger }}>
+          {suggestions.error instanceof Error ? suggestions.error.message : 'Could not load suggestions'}
+        </p>
+      )}
+      {suggestions.isPending && <p style={{ margin: 0, color: colors.muted }}>Loading…</p>}
+      {!suggestions.isPending && items.length === 0 && (
+        <p style={{ margin: 0, color: colors.muted }}>Nothing is under its minimum. No order needed.</p>
+      )}
+      {items.length > 0 && (
+        <>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: tokens.typography.sizes.sm }}>
+            <thead><tr style={{ textAlign: 'left', color: colors.muted }}><th>Medicine</th><th>Available</th><th>Minimum</th><th>Order</th></tr></thead>
+            <tbody>{items.map((item) => (
+              <tr key={item.storeProductId} style={{ borderTop: `1px solid ${colors.border}` }}>
+                <td style={{ padding: `${spacing.xs} 0` }}>{item.productName}<br /><span style={{ color: colors.muted }}>{item.sku}</span></td>
+                <td style={{ color: colors.warning }}>{item.available}</td>
+                <td>{item.minimumStock}</td>
+                <td><strong>{item.suggestedQuantity}</strong></td>
+              </tr>
+            ))}</tbody>
+          </table>
+          <button type="button" className="primary-action" disabled={busy} onClick={() => void createDraft()}>
+            {busy ? 'Building draft…' : `Create draft order (${items.length} lines)`}
+          </button>
+        </>
+      )}
+      {note && <p role="status" style={{ margin: 0, color: colors.success }}>{note}</p>}
+      {error && <p role="alert" className="form-error" style={{ margin: 0 }}>{error}</p>}
+    </section>
+  );
+}
+
 function PurchaseOrdersSection({ mayManagePurchases }: { mayManagePurchases: boolean }): ReactNode {
   const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = useState<PurchaseOrderStatusWire | ''>('');
@@ -175,6 +259,7 @@ function PurchaseOrdersSection({ mayManagePurchases }: { mayManagePurchases: boo
   return (
     <section className="surface purchasing-orders" style={{ ...card, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
       <h2 style={{ marginTop: 0, fontSize: tokens.typography.sizes.lg }}>Purchase Orders</h2>
+      <ReorderPanel onDraftCreated={(orderId) => setSelectedId(orderId)} />
 
       {(error !== null || note !== null || ordersQuery.isError) && (
         <p role={error !== null ? 'alert' : undefined} style={{ margin: 0, color: error !== null ? colors.danger : colors.success }}>

@@ -22,6 +22,9 @@ from app.domains.inventory import (
     StockReservation,
     StockTransfer,
     StockTransferItem,
+    Stocktake,
+    StocktakeItem,
+    StocktakeStatus,
     TransferStatus,
     allocate_fefo,
     rebuild_balances,
@@ -430,7 +433,7 @@ async def intake_inventory(
             sku=payload.shelf.sku or await _intake_sku(session, store.id, product.name),
             sale_price=payload.shelf.sale_price,
             minimum_stock=payload.shelf.minimum_stock or Decimal(0),
-            rack=payload.shelf.rack,
+            rack=normalize_rack(payload.shelf.rack),
             active=True,
         )
         session.add(shelf)
@@ -454,7 +457,7 @@ async def intake_inventory(
         if payload.shelf.minimum_stock is not None:
             shelf.minimum_stock = payload.shelf.minimum_stock
         if payload.shelf.rack is not None:
-            shelf.rack = payload.shelf.rack
+            shelf.rack = normalize_rack(payload.shelf.rack)
 
     if payload.shelf.barcode is not None:
         duplicate_barcode = await session.scalar(
@@ -697,6 +700,7 @@ async def adjust_stock(
         reference_type="adjustment",
         reference_id=None,
         idempotency_key=str(uuid4()),
+        reason=reason,
         occurred_at=now,
         actor_user_id=context.user_id,
     )
@@ -1201,6 +1205,377 @@ async def list_transfers(
             select(StockTransfer)
             .where(*scope)
             .order_by(StockTransfer.created_at.desc(), StockTransfer.id)
+            .limit(limit)
+            .offset(offset)
+        )
+    )
+    return rows, total
+
+
+# --- movement ledger ------------------------------------------------------------
+
+
+async def list_movements(
+    session: AsyncSession,
+    context: RequestContext,
+    *,
+    store_product_id: UUID | None = None,
+    movement_type: InventoryMovementType | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[tuple[InventoryMovement, StoreProduct, PharmacyProduct | None, InventoryBatch | None]], int]:
+    """The append-only ledger, newest first, dressed with product and batch.
+
+    Scoped to the caller's branch when the token carries one, so a ledger read
+    cannot wander into another shop's history.
+    """
+    scope: list[Any] = [InventoryMovement.organization_id == context.organization_id]
+    if context.store_id is not None:
+        scope.append(InventoryMovement.store_id == context.store_id)
+    if store_product_id is not None:
+        scope.append(InventoryMovement.store_product_id == store_product_id)
+    if movement_type is not None:
+        scope.append(InventoryMovement.movement_type == movement_type)
+    if start is not None:
+        scope.append(InventoryMovement.occurred_at >= start)
+    if end is not None:
+        scope.append(InventoryMovement.occurred_at < end)
+
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(InventoryMovement).where(*scope)
+        )
+        or 0
+    )
+    rows = list(
+        await session.execute(
+            select(InventoryMovement, StoreProduct, PharmacyProduct, InventoryBatch)
+            .join(StoreProduct, StoreProduct.id == InventoryMovement.store_product_id)
+            .outerjoin(PharmacyProduct, PharmacyProduct.id == StoreProduct.pharmacy_product_id)
+            .outerjoin(InventoryBatch, InventoryBatch.id == InventoryMovement.batch_id)
+            .where(*scope)
+            .order_by(InventoryMovement.occurred_at.desc(), InventoryMovement.id)
+            .limit(limit)
+            .offset(offset)
+        )
+    )
+    return rows, total
+
+
+# --- racks ----------------------------------------------------------------------
+
+
+def normalize_rack(rack: str | None) -> str | None:
+    """Trim and collapse whitespace; an all-blank rack is no rack at all.
+
+    Free-text entry forks racks on invisible differences ("Rack 1 ",
+    "Rack  1"), so every write passes through here before it lands.
+    """
+    if rack is None:
+        return None
+    collapsed = " ".join(rack.split())
+    return collapsed or None
+
+
+async def list_racks(
+    session: AsyncSession, context: RequestContext, store_id: UUID
+) -> list[tuple[str, int]]:
+    """Distinct normalized rack labels with their active item counts."""
+    store = await load_store(session, context, store_id)
+    products = list(
+        await session.scalars(
+            select(StoreProduct).where(
+                StoreProduct.store_id == store.id, StoreProduct.active.is_(True)
+            )
+        )
+    )
+    counts: dict[str, int] = {}
+    for product in products:
+        label = normalize_rack(product.rack)
+        if label is not None:
+            counts[label] = counts.get(label, 0) + 1
+    return sorted(counts.items())
+
+
+async def rename_rack(
+    session: AsyncSession,
+    context: RequestContext,
+    store_id: UUID,
+    *,
+    from_rack: str,
+    to_rack: str,
+    request_id: str = "unknown",
+) -> int:
+    """Move every item on one rack label to another; returns items moved.
+
+    Normalization on both ends means renaming "rack 1" into "Rack 1" is the
+    same operation as fixing a typo: match what is stored, write what is asked.
+    """
+    assert_adjustment_role(context)
+    store = await load_store(session, context, store_id)
+    source = normalize_rack(from_rack)
+    target = normalize_rack(to_rack)
+    if source is None or target is None:
+        raise ValidationError("Rack names cannot be blank")
+    if source == target:
+        return 0
+    products = list(
+        await session.scalars(
+            select(StoreProduct).where(StoreProduct.store_id == store.id)
+        )
+    )
+    moved = 0
+    for product in products:
+        if normalize_rack(product.rack) == source:
+            product.rack = target
+            moved += 1
+    record_audit(
+        session,
+        context,
+        action="inventory.rack_renamed",
+        entity_type="store_product",
+        entity_id=store.id,
+        request_id=request_id,
+        after=redact({"from": source, "to": target, "moved": moved}),
+    )
+    await session.commit()
+    return moved
+
+
+# --- reorder suggestions ----------------------------------------------------------
+
+
+async def reorder_suggestions(
+    session: AsyncSession, context: RequestContext, store_id: UUID
+) -> list[tuple[StoreProduct, PharmacyProduct | None, Decimal, Decimal]]:
+    """Below-minimum products with a suggested order quantity.
+
+    The suggestion refills to twice the minimum -- enough to clear the minimum
+    again without an immediate second order -- and is never below the minimum
+    itself, so a branch with a very low minimum still orders a useful amount.
+    """
+    store = await load_store(session, context, store_id)
+    low = await low_stock_products(session, context, store.id)
+    product_ids = [product.id for product, _available in low]
+    pharmacy_products = {
+        p.id: p
+        for p in await session.scalars(
+            select(PharmacyProduct).where(PharmacyProduct.id.in_(product_ids))
+        )
+    } if product_ids else {}
+    result: list[tuple[StoreProduct, PharmacyProduct | None, Decimal, Decimal]] = []
+    for product, available in low:
+        minimum = Decimal(product.minimum_stock)
+        suggested = max(minimum * 2 - available, minimum)
+        result.append((product, pharmacy_products.get(product.pharmacy_product_id), available, suggested))
+    return result
+
+
+# --- stocktakes -----------------------------------------------------------------
+
+
+async def create_stocktake(
+    session: AsyncSession,
+    context: RequestContext,
+    *,
+    note: str | None = None,
+    request_id: str = "unknown",
+) -> Stocktake:
+    """Open a count session for the caller's branch."""
+    assert_adjustment_role(context)
+    if context.store_id is None:
+        raise ValidationError("A count session needs the caller's branch", code="STORE_CONTEXT_REQUIRED")
+    stocktake = Stocktake(
+        organization_id=context.organization_id,
+        store_id=context.store_id,
+        note=note,
+        status=StocktakeStatus.DRAFT,
+        created_by_user_id=context.user_id,
+    )
+    session.add(stocktake)
+    record_audit(
+        session,
+        context,
+        action="inventory.stocktake_opened",
+        entity_type="stocktake",
+        entity_id=stocktake.id,
+        request_id=request_id,
+        after=redact({"note": note}),
+    )
+    await session.commit()
+    await session.refresh(stocktake)
+    return stocktake
+
+
+async def load_stocktake(
+    session: AsyncSession, context: RequestContext, stocktake_id: UUID
+) -> Stocktake:
+    stocktake = await session.get(Stocktake, stocktake_id)
+    if (
+        stocktake is None
+        or stocktake.organization_id != context.organization_id
+        or (context.store_id is not None and stocktake.store_id != context.store_id)
+    ):
+        raise NotFound("Stocktake not found")
+    return stocktake
+
+
+async def _stocktake_lines(
+    session: AsyncSession, context: RequestContext, stocktake: Stocktake
+) -> list[tuple[StocktakeItem, StoreProduct, PharmacyProduct | None]]:
+    """Counted lines joined to their products, with system on-hand per line."""
+    rows = list(
+        await session.scalars(
+            select(StocktakeItem).where(StocktakeItem.stocktake_id == stocktake.id)
+        )
+    )
+    lines: list[tuple[StocktakeItem, StoreProduct, PharmacyProduct | None]] = []
+    for item in rows:
+        product = await session.get(StoreProduct, item.store_product_id)
+        if product is None or product.store_id != stocktake.store_id:
+            continue
+        pharmacy_product = await session.get(PharmacyProduct, product.pharmacy_product_id)
+        lines.append((item, product, pharmacy_product))
+    return lines
+
+
+async def upsert_stocktake_line(
+    session: AsyncSession,
+    context: RequestContext,
+    stocktake_id: UUID,
+    *,
+    store_product_id: UUID,
+    counted_quantity: Decimal,
+) -> StocktakeItem:
+    """Record one counted quantity; a second count of the same line replaces it."""
+    assert_adjustment_role(context)
+    stocktake = await load_stocktake(session, context, stocktake_id)
+    if stocktake.status != StocktakeStatus.DRAFT:
+        raise Conflict("Only a draft count session can be edited")
+    store_product = await load_store_product(session, context, store_product_id)
+    if store_product.store_id != stocktake.store_id:
+        raise NotFound("Store product not found")
+    item = await session.scalar(
+        select(StocktakeItem).where(
+            StocktakeItem.stocktake_id == stocktake.id,
+            StocktakeItem.store_product_id == store_product.id,
+        )
+    )
+    if item is None:
+        item = StocktakeItem(
+            organization_id=context.organization_id,
+            stocktake_id=stocktake.id,
+            store_product_id=store_product.id,
+            counted_quantity=counted_quantity,
+        )
+        session.add(item)
+    else:
+        item.counted_quantity = counted_quantity
+    await session.commit()
+    await session.refresh(item)
+    return item
+
+
+async def stocktake_view(
+    session: AsyncSession, context: RequestContext, stocktake_id: UUID
+) -> tuple[Stocktake, list[tuple[StocktakeItem, StoreProduct, PharmacyProduct | None, Decimal]]]:
+    """The session with each line's counted vs system quantity and variance."""
+    stocktake = await load_stocktake(session, context, stocktake_id)
+    lines = await _stocktake_lines(session, context, stocktake)
+    dressed: list[tuple[StocktakeItem, StoreProduct, PharmacyProduct | None, Decimal]] = []
+    for item, product, pharmacy_product in lines:
+        balance = await session.scalar(
+            select(InventoryBalance).where(InventoryBalance.store_product_id == product.id)
+        )
+        system = Decimal(balance.on_hand) if balance else Decimal(0)
+        dressed.append((item, product, pharmacy_product, system - item.counted_quantity))
+    return stocktake, dressed
+
+
+async def finalize_stocktake(
+    session: AsyncSession,
+    context: RequestContext,
+    stocktake_id: UUID,
+    *,
+    request_id: str = "unknown",
+) -> tuple[Stocktake, int, int]:
+    """Book every variance as an adjustment and close the session.
+
+    Each non-zero delta becomes its own ``adjustment`` movement -- batchless,
+    like every manual correction -- carrying the stocktake id as its reference
+    so the ledger can show which count a correction came from. Zero-variance
+    lines are recorded as counted but move nothing.
+    """
+    assert_adjustment_role(context)
+    stocktake = await load_stocktake(session, context, stocktake_id)
+    if stocktake.status != StocktakeStatus.DRAFT:
+        raise Conflict("Stocktake already finalized")
+    lines = await _stocktake_lines(session, context, stocktake)
+    corrected = unchanged = 0
+    note = stocktake.note or "stocktake"
+    for item, product, _pharmacy_product in lines:
+        balance = await session.scalar(
+            select(InventoryBalance).where(InventoryBalance.store_product_id == product.id)
+        )
+        system = Decimal(balance.on_hand) if balance else Decimal(0)
+        delta = item.counted_quantity - system
+        if delta == 0:
+            unchanged += 1
+            continue
+        movement = InventoryMovement(
+            organization_id=product.organization_id,
+            store_id=product.store_id,
+            store_product_id=product.id,
+            batch_id=None,
+            movement_type=InventoryMovementType.ADJUSTMENT,
+            quantity=delta,
+            reference_type="stocktake",
+            reference_id=stocktake.id,
+            idempotency_key=str(uuid4()),
+            reason=f"Count correction ({note}): system {system}, counted {item.counted_quantity}",
+            occurred_at=utc_now(),
+            actor_user_id=context.user_id,
+        )
+        session.add(movement)
+        await _apply_to_balance(session, product, delta)
+        corrected += 1
+    stocktake.status = StocktakeStatus.COMPLETED
+    stocktake.completed_at = utc_now()
+    record_audit(
+        session,
+        context,
+        action="inventory.stocktake_finalized",
+        entity_type="stocktake",
+        entity_id=stocktake.id,
+        request_id=request_id,
+        after=redact({"corrected": corrected, "unchanged": unchanged}),
+    )
+    await session.commit()
+    await session.refresh(stocktake)
+    return stocktake, corrected, unchanged
+
+
+async def list_stocktakes(
+    session: AsyncSession,
+    context: RequestContext,
+    *,
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[list[Stocktake], int]:
+    """Count sessions for the caller's branch, newest first."""
+    scope: list[Any] = [Stocktake.organization_id == context.organization_id]
+    if context.store_id is not None:
+        scope.append(Stocktake.store_id == context.store_id)
+    total = int(
+        await session.scalar(select(func.count()).select_from(Stocktake).where(*scope)) or 0
+    )
+    rows = list(
+        await session.scalars(
+            select(Stocktake)
+            .where(*scope)
+            .order_by(Stocktake.created_at.desc(), Stocktake.id)
             .limit(limit)
             .offset(offset)
         )

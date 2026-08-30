@@ -17,8 +17,10 @@ from app.models import Role
 from app.schemas.base import Envelope, Page
 from app.schemas.reports import (
     BranchRollupResponse,
+    CogsResponse,
     ComparisonResponse,
     DailyMetricResponse,
+    DeadStockResponse,
     ExpenseCreateRequest,
     ExpenseResponse,
     ExpiryWarning,
@@ -26,6 +28,7 @@ from app.schemas.reports import (
     TodayMetricsResponse,
     TopCustomerRow,
     TopProductRow,
+    ValuationResponse,
 )
 from app.services import reports as service
 
@@ -191,3 +194,39 @@ async def read_top_customers(
         session, context, start=date_from, end=date_to, limit=limit
     )
     return Envelope(data=rows, request_id=request_id)
+
+
+@router.get("/inventory-valuation", response_model=Envelope[ValuationResponse])
+async def read_inventory_valuation(
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+) -> Envelope[ValuationResponse]:
+    """Cost-basis value of the caller's shelf, per product (owner/manager only)."""
+    result = await service.inventory_valuation(session, context)
+    return Envelope(data=result, request_id=request_id)
+
+
+@router.get("/dead-stock", response_model=Envelope[DeadStockResponse])
+async def read_dead_stock(
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+    idle_days: Annotated[int, Query(alias="idleDays", ge=1, le=730)] = 90,
+) -> Envelope[DeadStockResponse]:
+    """Held stock with no sale movement in ``idleDays`` (owner/manager only)."""
+    result = await service.dead_stock(session, context, idle_days=idle_days)
+    return Envelope(data=result, request_id=request_id)
+
+
+@router.get("/cogs", response_model=Envelope[CogsResponse])
+async def read_cogs(
+    session: SessionDep,
+    context: StoreManagerDep,
+    request_id: RequestIdDep,
+    date_from: Annotated[datetime, Query(alias="from")],
+    date_to: Annotated[datetime, Query(alias="to")],
+) -> Envelope[CogsResponse]:
+    """Batch cost of goods sold in the window, net of sale-return restocks."""
+    result = await service.windowed_cogs(session, context, start=date_from, end=date_to)
+    return Envelope(data=result, request_id=request_id)

@@ -212,3 +212,93 @@ class TransferResponse(ApiModel):
 
 class TransferItemResponse(TransferLineRequest):
     id: UUID
+
+
+# --- movement ledger ------------------------------------------------------------
+
+
+class MovementLedgerResponse(ApiModel):
+    """One ledger row dressed for the shelf: who, what batch, why."""
+
+    id: UUID
+    store_product_id: UUID
+    sku: str
+    product_name: str
+    batch_id: UUID | None
+    batch_number: str | None
+    movement_type: str
+    quantity: Decimal
+    reason: str | None
+    reference_type: str | None
+    occurred_at: datetime
+
+
+# --- racks ----------------------------------------------------------------------
+
+
+class RackResponse(ApiModel):
+    """One physical rack and how many active shelf items sit on it."""
+
+    rack: str
+    item_count: NonNegativeInt
+
+
+class RackRenameRequest(ApiModel):
+    """Merge or retitle a rack: every item on ``from`` moves to ``to``."""
+
+    store_id: UUID
+    from_rack: Annotated[str, Field(min_length=1, max_length=80)]
+    to_rack: Annotated[str, Field(min_length=1, max_length=80)]
+
+
+# --- stocktakes -----------------------------------------------------------------
+
+
+class StocktakeCreateRequest(ApiModel):
+    note: Annotated[str | None, Field(max_length=280)] = None
+
+
+class StocktakeLineRequest(ApiModel):
+    """A counted quantity for one product; resubmitting a line replaces it."""
+
+    store_product_id: UUID
+    counted_quantity: Annotated[Decimal, Field(ge=0)]
+
+
+class StocktakeLineResponse(ApiModel):
+    store_product_id: UUID
+    sku: str
+    product_name: str
+    counted_quantity: Decimal
+    system_quantity: Decimal
+    variance: Decimal
+
+
+class StocktakeResponse(ApiModel):
+    id: UUID
+    store_id: UUID
+    status: str
+    note: str | None
+    created_at: datetime
+    completed_at: datetime | None
+    lines: list[StocktakeLineResponse]
+
+
+class StocktakeSummaryResponse(ApiModel):
+    stocktake: StocktakeResponse
+    corrected_lines: NonNegativeInt
+    unchanged_lines: NonNegativeInt
+
+
+# --- reorder suggestions ----------------------------------------------------------
+
+
+class ReorderSuggestionResponse(ApiModel):
+    """Below-minimum product with a suggested order quantity attached."""
+
+    store_product_id: UUID
+    sku: str
+    product_name: str
+    available: Decimal
+    minimum_stock: Decimal
+    suggested_quantity: Decimal

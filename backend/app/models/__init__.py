@@ -25,6 +25,9 @@ from app.domains.inventory import (
     InventoryBatch,
     InventoryMovement,
     StockReservation,
+    Stocktake,
+    StocktakeItem,
+    StocktakeStatus,
 )
 from app.domains.loyalty import LoyaltyAccount, LoyaltyTransaction
 from app.domains.orders import Order, OrderItem, OrderStatusHistory

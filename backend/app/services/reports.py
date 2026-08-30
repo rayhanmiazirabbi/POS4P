@@ -21,13 +21,18 @@ from app.schemas.reports import (
     BranchRollupResponse,
     BranchRollupRow,
     ComparisonResponse,
+    CogsResponse,
     DailyMetricResponse,
+    DeadStockLine,
+    DeadStockResponse,
     ExpenseCreateRequest,
     ExpiryWarning,
     LowStockItem,
     TodayMetricsResponse,
     TopCustomerRow,
     TopProductRow,
+    ValuationLine,
+    ValuationResponse,
 )
 from app.security import utc_now
 from app.services.audit import record_audit, redact
@@ -689,3 +694,154 @@ async def top_customers(
         )
         for customer_id, name, count, spent in result_rows
     ]
+
+
+# --- stage 3: stock valuation, dead stock, windowed COGS -----------------------
+
+
+async def _stock_at_cost(session: AsyncSession, store: Store) -> dict[UUID, tuple[Decimal, Decimal]]:
+    """Per product: (quantity held, cost value of that quantity), batch-sourced.
+
+    Valuation follows the same source of truth as FEFO allocation -- movement
+    sums per batch -- so a valuation can never disagree with what the shelf
+    would actually hand a customer. Batchless corrections (damage, counts) are
+    invisible here by design: a unit with no batch has no cost attached to it.
+    Costless opening stock is valued at zero, which is what was paid.
+    """
+    rows = await session.execute(
+        select(InventoryMovement.batch_id, func.sum(InventoryMovement.quantity))
+        .where(
+            InventoryMovement.store_id == store.id,
+            InventoryMovement.batch_id.is_not(None),
+        )
+        .group_by(InventoryMovement.batch_id)
+    )
+    on_hand = {batch_id: _money(total) for batch_id, total in rows.all()}
+    per_product: dict[UUID, tuple[Decimal, Decimal]] = {}
+    for batch in await session.scalars(
+        select(InventoryBatch).where(InventoryBatch.store_id == store.id)
+    ):
+        quantity = on_hand.get(batch.id, Decimal(0))
+        if quantity <= 0:
+            continue
+        held, value = per_product.get(batch.store_product_id, (Decimal(0), Decimal(0)))
+        per_product[batch.store_product_id] = (
+            held + quantity,
+            value + (quantity * Decimal(batch.unit_cost)).quantize(CENT),
+        )
+    return per_product
+
+
+async def inventory_valuation(
+    session: AsyncSession, context: RequestContext
+) -> ValuationResponse:
+    """Cost-basis value of everything on the caller's shelves (owner/manager)."""
+    if not can_see_profit(context):
+        raise Forbidden("Valuation requires owner or manager")
+    store = await load_current_store(session, context)
+    stock = await _stock_at_cost(session, store)
+    products = list(
+        await session.scalars(
+            select(StoreProduct).where(
+                StoreProduct.store_id == store.id, StoreProduct.active.is_(True)
+            ).order_by(StoreProduct.sku)
+        )
+    )
+    names = await _product_names(session, products)
+    lines = [
+        ValuationLine(
+            store_product_id=product.id,
+            sku=product.sku,
+            product_name=names.get(product.id, product.sku),
+            rack=product.rack,
+            on_hand=stock.get(product.id, (Decimal(0), Decimal(0)))[0],
+            value_at_cost=stock.get(product.id, (Decimal(0), Decimal(0)))[1],
+        )
+        for product in products
+        if product.id in stock
+    ]
+    return ValuationResponse(
+        store_id=store.id,
+        total_value_at_cost=sum((line.value_at_cost for line in lines), Decimal(0)).quantize(CENT),
+        lines=lines,
+    )
+
+
+async def dead_stock(
+    session: AsyncSession, context: RequestContext, *, idle_days: int = 90
+) -> DeadStockResponse:
+    """Held stock with no sale movement in ``idle_days`` (owner/manager).
+
+    Cost sits in the shelves doing nothing; the list is what an owner trims or
+    returns to the supplier. "Never sold" counts as dead from the day it arrived.
+    """
+    if not can_see_profit(context):
+        raise Forbidden("Dead stock report requires owner or manager")
+    if idle_days < 0:
+        raise ValidationError("idle_days must be non-negative")
+    store = await load_current_store(session, context)
+    cutoff = utc_now() - timedelta(days=idle_days)
+    last_sold_rows = await session.execute(
+        select(InventoryMovement.store_product_id, func.max(InventoryMovement.occurred_at))
+        .where(
+            InventoryMovement.store_id == store.id,
+            InventoryMovement.movement_type == InventoryMovementType.SALE,
+        )
+        .group_by(InventoryMovement.store_product_id)
+    )
+    last_sold = dict(last_sold_rows.all())
+    # SQLite hands stored-UTC datetimes back naive, PostgreSQL aware; the cutoff
+    # is aware, so pin every comparison to aware-UTC regardless of driver.
+    from datetime import UTC as _UTC
+
+    def _aware(moment: datetime | None) -> datetime | None:
+        return moment.replace(tzinfo=_UTC) if moment is not None and moment.tzinfo is None else moment
+
+    stock = await _stock_at_cost(session, store)
+    candidates = [
+        product
+        for product in await session.scalars(
+            select(StoreProduct).where(
+                StoreProduct.store_id == store.id, StoreProduct.active.is_(True)
+            ).order_by(StoreProduct.sku)
+        )
+        if stock.get(product.id, (Decimal(0), Decimal(0)))[0] > 0
+        and (_aware(last_sold.get(product.id)) is None or _aware(last_sold[product.id]) < cutoff)
+    ]
+    names = await _product_names(session, candidates)
+    lines = [
+        DeadStockLine(
+            store_product_id=product.id,
+            sku=product.sku,
+            product_name=names.get(product.id, product.sku),
+            on_hand=stock.get(product.id, (Decimal(0), Decimal(0)))[0],
+            value_at_cost=stock.get(product.id, (Decimal(0), Decimal(0)))[1],
+            last_sold_at=last_sold.get(product.id),
+        )
+        for product in candidates
+    ]
+    return DeadStockResponse(
+        store_id=store.id,
+        idle_days=idle_days,
+        total_value_at_cost=sum((line.value_at_cost for line in lines), Decimal(0)).quantize(CENT),
+        lines=lines,
+    )
+
+
+async def windowed_cogs(
+    session: AsyncSession,
+    context: RequestContext,
+    *,
+    start: datetime,
+    end: datetime,
+) -> CogsResponse:
+    """Batch cost of goods sold across an arbitrary window (owner/manager).
+
+    Reuses the today-metrics cost query so the windowed figure and the daily
+    profit figure come from the same code path and cannot drift apart.
+    """
+    if not can_see_profit(context):
+        raise Forbidden("Cost of goods sold requires owner or manager")
+    store = await load_current_store(session, context)
+    total = await _cost_of_goods_sold(session, context, store, start, end)
+    return CogsResponse(store_id=store.id, start=start, end=end, cost_of_goods_sold=total)

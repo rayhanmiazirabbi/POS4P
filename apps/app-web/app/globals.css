@@ -207,6 +207,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .catalogue-results li { transition: background .14s ease, border-color .14s ease; }
 .catalogue-results li:focus-within { background: var(--pos-soft); border-color: #b8cdc1 !important; }
 .inventory-page { grid-template-columns: minmax(310px, .72fr) minmax(0, 1.28fr); }
+/* A medicine sitting on a rack board. Hover lives here because inline styles cannot say it. */
+.shelf-box { display: grid; gap: 2px; min-width: 0; padding: 8px 10px; text-align: left; color: var(--pos-ink); background: #fff; border: 1px solid var(--pos-line); border-radius: 8px; cursor: pointer; transition: background .14s ease, border-color .14s ease; }
+.shelf-box:hover { background: var(--pos-soft); border-color: var(--pos-line-strong); }
+.shelf-box strong { min-width: 0; }
 .inventory-stock table th, .inventory-stock table td, .purchasing-page table th, .purchasing-page table td { padding: 6px 5px; border-bottom: 1px solid var(--pos-line); vertical-align: top; }
 .inventory-stock table th, .purchasing-page table th { color: var(--pos-muted); font-size: 11px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
 .purchasing-page { grid-template-columns: minmax(0, 1.28fr) minmax(370px, .72fr); }

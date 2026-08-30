@@ -840,6 +840,12 @@ export type ReportsClient = {
   expiry(withinDays?: number, options?: RequestOptions): Promise<ApiResponse<readonly ExpiryWarning[]>>;
   listExpenses(filters?: ExpenseFilters, pagination?: Pagination, options?: RequestOptions): Promise<Page<Expense>>;
   createExpense(body: ExpenseCreateRequest, options?: RequestOptions): Promise<ApiResponse<Expense>>;
+  /** Cost-basis shelf value per product. Owner/manager only. */
+  inventoryValuation(options?: RequestOptions): Promise<ApiResponse<InventoryValuation>>;
+  /** Held stock with no sale movement in `idleDays`. Owner/manager only. */
+  deadStock(idleDays?: number, options?: RequestOptions): Promise<ApiResponse<DeadStockReport>>;
+  /** Batch cost of goods sold in `[from, to)`. Owner/manager only. */
+  cogs(from: string, to: string, options?: RequestOptions): Promise<ApiResponse<CogsSummary>>;
 };
 
 export function createReportsClient(client: ApiClient): ReportsClient {
@@ -857,8 +863,32 @@ export function createReportsClient(client: ApiClient): ReportsClient {
     listExpenses: ({ from, to } = {}, pagination = {}, options = {}) =>
       client.list<Expense>('/reports/expenses', pagination, { ...options, query: { ...options.query, from, to } }),
     createExpense: (body, options = {}) => client.post<Expense>('/reports/expenses', body, options),
+    inventoryValuation: (options = {}) => client.get<InventoryValuation>('/reports/inventory-valuation', options),
+    deadStock: (idleDays = 90, options = {}) =>
+      client.get<DeadStockReport>('/reports/dead-stock', { ...options, query: { ...options.query, idleDays } }),
+    cogs: (from, to, options = {}) => client.get<CogsSummary>('/reports/cogs', { ...options, query: { ...options.query, from, to } }),
   };
 }
+
+export type ValuationLine = {
+  storeProductId: string;
+  sku: string;
+  productName: string;
+  rack?: string | null;
+  onHand: string;
+  valueAtCost: string;
+};
+export type InventoryValuation = { storeId: string; totalValueAtCost: string; items: readonly ValuationLine[] };
+export type DeadStockLine = {
+  storeProductId: string;
+  sku: string;
+  productName: string;
+  onHand: string;
+  valueAtCost: string;
+  lastSoldAt?: string | null;
+};
+export type DeadStockReport = { storeId: string; idleDays: number; totalValueAtCost: string; items: readonly DeadStockLine[] };
+export type CogsSummary = { storeId: string; start: string; end: string; costOfGoodsSold: string };
 
 export type SyncDevice = { id: string; storeId: string; name: string; deviceKey: string; status: DeviceStatus; createdAt: string };
 
@@ -935,6 +965,64 @@ export type StoreProductEnableRequest = { pharmacyProductId: string; sku: string
 
 export type StockRow = { storeProductId: string; onHand: string; reserved: string; available: string; lowStock: boolean };
 export type ExpiringBatch = { batchId: string; storeProductId: string; batchNumber: string; expiryDate?: string | null; available: string; daysUntilExpiry: number; expired: boolean };
+
+export type BalanceSnapshot = { storeProductId: string; onHand: string; reserved: string; available: string };
+export type AdjustmentRequest = { storeProductId: string; batchId?: string; quantity: string; reason: string; damage?: boolean };
+export type ProductBatch = { batchId: string; batchNumber: string; expiryDate?: string | null; receivedAt: string; unitCost: string; available: string; expired: boolean };
+export type MovementQuery = { storeProductId?: string; movementType?: string; start?: string; end?: string };
+export type MovementLedgerRow = {
+  id: string;
+  storeProductId: string;
+  sku: string;
+  productName: string;
+  batchId?: string | null;
+  batchNumber?: string | null;
+  movementType: string;
+  quantity: string;
+  reason?: string | null;
+  referenceType?: string | null;
+  occurredAt: string;
+};
+export type RackSummary = { rack: string; itemCount: number };
+export type RackRenameRequest = { storeId: string; fromRack: string; toRack: string };
+export type ReorderSuggestion = { storeProductId: string; sku: string; productName: string; available: string; minimumStock: string; suggestedQuantity: string };
+export type StocktakeStatus = 'draft' | 'completed';
+export type StocktakeLine = {
+  storeProductId: string;
+  sku: string;
+  productName: string;
+  countedQuantity: string;
+  systemQuantity: string;
+  variance: string;
+};
+export type Stocktake = {
+  id: string;
+  storeId: string;
+  status: StocktakeStatus;
+  note?: string | null;
+  createdAt: string;
+  completedAt?: string | null;
+  lines: readonly StocktakeLine[];
+};
+export type StocktakeCreateRequest = { note?: string };
+export type StocktakeLineRequest = { storeProductId: string; countedQuantity: string };
+export type StocktakeFinalized = { stocktake: Stocktake; correctedLines: number; unchangedLines: number };
+export type StockTransferStatus = 'draft' | 'in_transit' | 'received' | 'cancelled';
+export type StockTransferSummary = {
+  id: string;
+  transferNumber: string;
+  fromStoreId: string;
+  toStoreId: string;
+  status: StockTransferStatus;
+  shippedAt?: string | null;
+  receivedAt?: string | null;
+};
+export type TransferCreateRequest = {
+  transferNumber: string;
+  fromStoreId: string;
+  toStoreId: string;
+  items: readonly { storeProductId: string; quantity: string }[];
+};
 export type ReceiveBatchRequest = { storeProductId: string; batchNumber: string; expiryDate?: string; unitCost: string; quantity: string };
 export type InventoryIntakeRequest = {
   source: 'opening_stock' | 'supplier_receive';
@@ -1221,6 +1309,30 @@ export type InventoryClient = {
   /** Requires an idempotency key (send one via `options.idempotencyKey`). */
   receiveBatch(body: ReceiveBatchRequest, options?: RequestOptions): Promise<ApiResponse<unknown>>;
   intake(body: InventoryIntakeRequest, options?: RequestOptions): Promise<ApiResponse<InventoryIntake>>;
+  /** Signed correction: damage, expiry disposal, count fixes. Owner/manager only. */
+  adjust(body: AdjustmentRequest, options?: RequestOptions): Promise<ApiResponse<BalanceSnapshot>>;
+  /** Batches behind one product, FEFO order, expired flagged but listed. */
+  batches(storeProductId: string, options?: RequestOptions): Promise<ApiResponse<readonly ProductBatch[]>>;
+  /** The append-only ledger, newest first. */
+  movements(params?: MovementQuery, pagination?: Pagination, options?: RequestOptions): Promise<Page<MovementLedgerRow>>;
+  /** Distinct rack labels with active item counts. */
+  racks(storeId: string, options?: RequestOptions): Promise<ApiResponse<readonly RackSummary[]>>;
+  /** Move every item on one rack label to another. Owner/manager only. */
+  renameRack(body: RackRenameRequest, options?: RequestOptions): Promise<ApiResponse<RackSummary>>;
+  /** Below-minimum products with a suggested refill quantity. */
+  reorderSuggestions(storeId: string, options?: RequestOptions): Promise<ApiResponse<readonly ReorderSuggestion[]>>;
+  listStocktakes(pagination?: Pagination, options?: RequestOptions): Promise<Page<Stocktake>>;
+  createStocktake(body: StocktakeCreateRequest, options?: RequestOptions): Promise<ApiResponse<Stocktake>>;
+  readStocktake(stocktakeId: string, options?: RequestOptions): Promise<ApiResponse<Stocktake>>;
+  /** Record one counted line; recounting a line replaces it. */
+  addStocktakeLine(stocktakeId: string, body: StocktakeLineRequest, options?: RequestOptions): Promise<ApiResponse<Stocktake>>;
+  /** Book every variance as an adjustment and close the session. */
+  finalizeStocktake(stocktakeId: string, options?: RequestOptions): Promise<ApiResponse<StocktakeFinalized>>;
+  listTransfers(params?: { statusFilter?: string }, pagination?: Pagination, options?: RequestOptions): Promise<Page<StockTransferSummary>>;
+  createTransfer(body: TransferCreateRequest, options?: RequestOptions): Promise<ApiResponse<StockTransferSummary>>;
+  shipTransfer(transferId: string, options?: RequestOptions): Promise<ApiResponse<StockTransferSummary>>;
+  receiveTransfer(transferId: string, options?: RequestOptions): Promise<ApiResponse<StockTransferSummary>>;
+  cancelTransfer(transferId: string, options?: RequestOptions): Promise<ApiResponse<StockTransferSummary>>;
 };
 
 export function createInventoryClient(client: ApiClient): InventoryClient {
@@ -1232,6 +1344,27 @@ export function createInventoryClient(client: ApiClient): InventoryClient {
     // so every receive from the web app was a 404.
     receiveBatch: (body, options = {}) => client.post<unknown>('/inventory/receive', body, options),
     intake: (body, options = {}) => client.post<InventoryIntake>('/inventory/intakes', body, options),
+    adjust: (body, options = {}) => client.post<BalanceSnapshot>('/inventory/adjustments', body, options),
+    batches: (storeProductId, options = {}) => client.get<readonly ProductBatch[]>(`/inventory/stock/${segment(storeProductId)}/batches`, options),
+    movements: ({ storeProductId, movementType, start, end } = {}, pagination = {}, options = {}) =>
+      client.list<MovementLedgerRow>('/inventory/movements', pagination, {
+        ...options,
+        query: { ...options.query, ...(storeProductId ? { storeProductId } : {}), ...(movementType ? { movementType } : {}), ...(start ? { start } : {}), ...(end ? { end } : {}) },
+      }),
+    racks: (storeId, options = {}) => client.get<readonly RackSummary[]>('/inventory/racks', { ...options, query: { ...options.query, storeId } }),
+    renameRack: (body, options = {}) => client.post<RackSummary>('/inventory/racks/rename', body, options),
+    reorderSuggestions: (storeId, options = {}) => client.get<readonly ReorderSuggestion[]>('/inventory/reorder-suggestions', { ...options, query: { ...options.query, storeId } }),
+    listStocktakes: (pagination = {}, options = {}) => client.list<Stocktake>('/inventory/stocktakes', pagination, options),
+    createStocktake: (body, options = {}) => client.post<Stocktake>('/inventory/stocktakes', body, options),
+    readStocktake: (stocktakeId, options = {}) => client.get<Stocktake>(`/inventory/stocktakes/${segment(stocktakeId)}`, options),
+    addStocktakeLine: (stocktakeId, body, options = {}) => client.post<Stocktake>(`/inventory/stocktakes/${segment(stocktakeId)}/items`, body, options),
+    finalizeStocktake: (stocktakeId, options = {}) => client.post<StocktakeFinalized>(`/inventory/stocktakes/${segment(stocktakeId)}/finalize`, undefined, options),
+    listTransfers: ({ statusFilter } = {}, pagination = {}, options = {}) =>
+      client.list<StockTransferSummary>('/inventory/transfers', pagination, { ...options, query: { ...options.query, ...(statusFilter ? { statusFilter } : {}) } }),
+    createTransfer: (body, options = {}) => client.post<StockTransferSummary>('/inventory/transfers', body, options),
+    shipTransfer: (transferId, options = {}) => client.post<StockTransferSummary>(`/inventory/transfers/${segment(transferId)}/ship`, undefined, options),
+    receiveTransfer: (transferId, options = {}) => client.post<StockTransferSummary>(`/inventory/transfers/${segment(transferId)}/receive`, undefined, options),
+    cancelTransfer: (transferId, options = {}) => client.post<StockTransferSummary>(`/inventory/transfers/${segment(transferId)}/cancel`, undefined, options),
   };
 }
 
